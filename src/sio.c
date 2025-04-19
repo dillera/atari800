@@ -215,12 +215,20 @@ int SIO_Initialise(int *argc, char *argv[])
 
 #ifdef USE_FUJINET
 	/* Initialize FujiNet with default settings */
+	printf("\n\n***** ATTEMPTING TO INITIALIZE FUJINET *****\n");
+	fflush(stdout);
 	if (FujiNet_Initialise(NULL)) {
+		printf("***** FUJINET INITIALIZED SUCCESSFULLY *****\n");
+		fflush(stdout);
 		Log_print("FujiNet: Initialized successfully");
 	}
 	else {
+		printf("***** FUJINET INITIALIZATION FAILED *****\n");
+		fflush(stdout);
 		Log_print("FujiNet: Initialization failed");
 	}
+	printf("***** FUJINET INITIALIZATION COMPLETE *****\n\n");
+	fflush(stdout);
 #endif
 
 	return TRUE;
