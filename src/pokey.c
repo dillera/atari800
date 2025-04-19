@@ -63,6 +63,10 @@
 void pokey_update(void);
 #endif
 
+#ifdef USE_FUJINET
+#include "fujinet.h"
+#endif
+
 UBYTE POKEY_KBCODE;
 UBYTE POKEY_SERIN;
 UBYTE POKEY_IRQST;
@@ -204,6 +208,16 @@ void POKEY_PutByte(UWORD addr, UBYTE byte)
 		POKEYSND_Update(POKEY_OFFSET_AUDC4, byte, 0, SOUND_GAIN);
 		break;
 	case POKEY_OFFSET_AUDCTL:
+#ifdef USE_FUJINET
+		// Check motor state change *before* updating POKEY_AUDCTL[0]
+		if (FujiNet_IsEnabled()) {
+			UBYTE old_audctl = POKEY_AUDCTL[0];
+			// Check Bit 5 (0x20) for change (Motor On signal)
+			if ((old_audctl & 0x20) != (byte & 0x20)) {
+				FujiNet_SetMotor((byte & 0x20) ? 1 : 0);
+			}
+		}
+#endif
 		POKEY_AUDCTL[0] = byte;
 
 		/* determine the base multiplier for the 'div by n' calculations */

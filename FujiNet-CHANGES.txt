@@ -1,0 +1,62 @@
+# Detailed Changes for FujiNet Integration
+
+## Summary
+Fixed building the Atari800 emulator with FujiNet support by restoring missing SIO function definitions and resolving compatibility issues.
+
+## Specific Changes
+
+1. Added missing SIO function implementations in sio.c:
+   - SIO_ReadSector
+   - SIO_WriteSector
+   - SIO_FormatDisk
+   - SIO_ReadStatusBlock
+   - SIO_WriteStatusBlock
+   - SIO_DriveStatus
+   - Command_Frame (static helper function)
+
+2. Added missing definitions in sio.c:
+   - SIO Status Codes:
+     - SIO_OK             (0)
+     - SIO_ERROR          (1)
+     - SIO_COMPLETE       (2)
+     - SIO_CHECKSUM_ERROR (3)
+   
+   - SIO Protocol Bytes:
+     - SIO_ACK            ('A')
+     - SIO_NAK            ('N')
+     - SIO_COMPLETE_FRAME ('C')
+     - SIO_ERROR_FRAME    ('E')
+   
+   - Buffer size: SIO_BUFFER_SIZE (132)
+
+3. Fixed function signatures to match sio.h declarations:
+   - Changed UBYTE unit to int unit in function definitions
+   - Added UBYTE *buffer parameters to functions
+   - Added explicit casts where int/UBYTE type conflicts existed
+
+4. Commented out incompatible VAPI code:
+   - Removed references to non-existent struct members (last_read, last_write)
+   - Added comments explaining the incompatibility
+
+5. Fixed SIO_Handler calling convention:
+   - Removed parameter from SIO_Handler call in Command_Frame
+   - Replaced direct buffer access with global DataBuffer
+
+6. Fixed function redefinitions:
+   - Added static keyword to Command_Frame definition
+   - Removed duplicate SIO_SwitchCommandFrame definition
+
+7. Fixed C compatibility issues:
+   - Changed C++ style comments (//) to C-style comments (/* */)
+   - Made variable declarations C89-compatible
+   - Added (void) casts to silence unused variable warnings
+
+8. Created documentation:
+   - Added FujiNet-README.md with integration details
+   - Created this detailed changelog
+
+## Files Modified
+- src/sio.c: Primary file containing all SIO function implementations
+
+## Build Results
+The build now completes successfully with only minor warnings about unused variables.
