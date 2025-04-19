@@ -51,7 +51,13 @@ Fixed building the Atari800 emulator with FujiNet support by restoring missing S
    - Made variable declarations C89-compatible
    - Added (void) casts to silence unused variable warnings
 
-8. Created documentation:
+8. Added FujiNet integration:
+   - Added FujiNet initialization call in SIO_Initialise function
+   - Added FujiNet cleanup call in SIO_Exit function
+   - Modified Command_Frame to check if commands should be handled by FujiNet
+   - Implemented proper response handling for FujiNet commands
+
+9. Created documentation:
    - Added FujiNet-README.md with integration details
    - Created this detailed changelog
 

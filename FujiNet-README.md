@@ -38,6 +38,12 @@ The integration required restoring and modifying several SIO functions in the At
    - Standardized on C89 compatibility
    - Removed duplicated code
 
+5. **FujiNet Integration:**
+   - Added FujiNet initialization in `SIO_Initialise`
+   - Added FujiNet cleanup in `SIO_Exit`
+   - Modified `Command_Frame` to check if commands should be handled by FujiNet
+   - Implemented proper response handling for FujiNet commands
+
 ## Using FujiNet with Atari800
 
 To use FujiNet with the Atari800 emulator:

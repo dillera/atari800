@@ -213,6 +213,16 @@ int SIO_Initialise(int *argc, char *argv[])
 	}
 	TransferStatus = SIO_NoFrame;
 
+#ifdef USE_FUJINET
+	/* Initialize FujiNet with default settings */
+	if (FujiNet_Initialise(NULL)) {
+		Log_print("FujiNet: Initialized successfully");
+	}
+	else {
+		Log_print("FujiNet: Initialization failed");
+	}
+#endif
+
 	return TRUE;
 }
 
@@ -222,6 +232,12 @@ void SIO_Exit(void)
 	int i;
 	for (i = 1; i <= SIO_MAX_DRIVES; i++)
 		SIO_Dismount(i);
+
+#ifdef USE_FUJINET
+	/* Shutdown FujiNet */
+	FujiNet_Shutdown();
+	Log_print("FujiNet: Shutdown complete");
+#endif
 }
 
 int SIO_Mount(int diskno, const char *filename, int b_open_readonly)
@@ -908,6 +924,9 @@ static int Command_Frame(UBYTE *data_buffer)
 	static int last_atari_frame_num = -1; /* Redeclare */
 	int atari_frame_num;
 	int i;
+#ifdef USE_FUJINET
+	unsigned char response_frame[4]; /* For FujiNet response */
+#endif
 
 	(void)timeout; /* Suppress unused variable warning */
 
@@ -919,7 +938,7 @@ static int Command_Frame(UBYTE *data_buffer)
 
 	if (SIO_FrameCounter == 0) {
 		/* Init */
-		SIO_last_result = SIO_OK;
+		SIO_FrameCounter = 1;
 	}
 
 	SIO_FrameCounter++;
@@ -930,28 +949,61 @@ static int Command_Frame(UBYTE *data_buffer)
 	}
 	last_atari_frame_num = atari_frame_num;
 
-	if (frame_resent && SIO_last_result != SIO_OK) {
-		/* Send back the last error */
-		goto SendResult;
-	}
-
+	/* Get data length */
 	data_len = data_buffer[1];
 	if (data_len > SIO_BUFFER_SIZE - 2) {
 		SIO_last_result = SIO_CHECKSUM_ERROR;
 		goto SendResult;
 	}
 
+#ifdef USE_FUJINET
+	/* Check if FujiNet is enabled and should handle this command */
+	if (FujiNet_IsEnabled()) {
+		/* Try to process the command with FujiNet */
+		if (FujiNet_ProcessCommand(data_buffer, response_frame)) {
+			/* Command was processed by FujiNet */
+			/* Map FujiNet response to SIO result codes */
+			switch (response_frame[0]) {
+			case 'A': /* ACK */
+				SIO_last_result = SIO_OK;
+				break;
+			case 'C': /* COMPLETE */
+				SIO_last_result = SIO_COMPLETE;
+				break;
+			case 'E': /* ERROR */
+				SIO_last_result = SIO_ERROR;
+				break;
+			case 'N': /* NAK */
+				SIO_last_result = SIO_CHECKSUM_ERROR;
+				break;
+			default:
+				SIO_last_result = SIO_ERROR;
+				break;
+			}
+			goto SendResult;
+		}
+		/* If FujiNet didn't handle it, continue with regular SIO processing */
+	}
+#endif
+
+	/* Verify checksum */
 	checksum = 0;
+	/* C89: Use pre-declared i */
 	for (i = 0; i < data_len; i++) {
 		checksum += data_buffer[i + 2];
 	}
 
 	if (checksum != data_buffer[data_len + 2]) {
+		/* Checksum error */
 		SIO_last_result = SIO_CHECKSUM_ERROR;
 		goto SendResult;
 	}
 
 	/* Command frame looks ok. Process it */
+	memcpy(DataBuffer, data_buffer + 2, data_len);
+
+	/* Call SIO_Handler (which operates on global DataBuffer) */
+	/* SIO_Handler is void, but sets the global SIO_last_result */
 	SIO_Handler();
 
 SendResult:
