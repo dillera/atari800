@@ -1,12 +1,12 @@
-#include "config.h" /* For HAVE_SOCKET etc. */
-
-#ifdef USE_FUJINET
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <stdarg.h>  /* For va_start, va_end */
+
+#include "config.h" /* For HAVE_SOCKET etc. */
+
+#ifdef USE_FUJINET
 
 #ifdef HAVE_SOCKET
 #include <sys/types.h>
@@ -14,38 +14,40 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
-#include <unistd.h>
+#include <unistd.h> /* For close() */
 #define SOCKET int
 #define INVALID_SOCKET (-1)
-#define SOCKET_ERROR (-1)
 #define closesocket close
-#else /* Assume Windows */
+#define SOCKET_ERROR (-1)
+#else /* Windows */
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "Ws2_32.lib")
+#define SOCKET SOCKET
 #endif /* HAVE_SOCKET */
 
+#include "atari.h" /* For Atari->Exit() */
+#include "sio.h"   /* For SIO command codes and responses */
 #include "log.h"
-#include "fujinet.h"
 #include "util.h" /* For Util_strdup */
+#include "fujinet.h"
 
 #define FUJINET_DEFAULT_HOST "127.0.0.1"
 #define FUJINET_DEFAULT_PORT 9996  /* NetSIO TCP service port */
-#define FUJINET_BUFFER_SIZE 1024
 #define FUJINET_TIMEOUT_SEC 5 /* Timeout for socket operations */
 
 /* Altirra Device Protocol Event IDs */
 #define EVENT_CONNECTED      0x01
-#define EVENT_COMMAND_ON     0x10
-#define EVENT_COMMAND_OFF    0x11
-#define EVENT_DATA_TO_DEVICE 0x12
+#define EVENT_COMMAND_ON     0x11 /* Value from test client */
+#define EVENT_COMMAND_OFF    0x18 /* Value from test client (COMMAND_OFF_SYNC) */
+#define EVENT_DATA_TO_DEVICE 0x02 /* Value from test client (DATA_BLOCK) */
 #define EVENT_RESET          0xF0
 #define EVENT_BOOT           0xF1
 
 /* Altirra Device Protocol Response Events */
 #define EVENT_ERROR          0x90
-#define EVENT_ACK            0x91
-#define EVENT_DATA_FROM_DEVICE 0x92
+#define EVENT_ACK            0x81 /* Value from test client (SYNC_RESPONSE, potentially used as ACK?) */
+#define EVENT_DATA_FROM_DEVICE 0x92 /* Keeping original for final data response, test uses SYNC_RESPONSE */
 #define EVENT_EVENT          0x93
 #define EVENT_DTR_CHANGE     0x94
 
@@ -71,10 +73,34 @@ static void log_message(const char *format, ...) {
     Log_print("FujiNet: " msg, __VA_ARGS__); \
 } while(0)
 
+/* Altirra NetSIO Sync Byte */
+#define NETSIO_SYNC 0xFF
+
+/* Conditional Logging Macros */
+#ifdef DEBUG_FUJINET
+#define FUJINET_LOG_DEBUG(msg, ...) do { Log_print("FujiNet DEBUG: " msg, ##__VA_ARGS__); } while(0)
+#else
+#define FUJINET_LOG_DEBUG(msg, ...) ((void)0)
+#endif
+
+#define FUJINET_LOG_ERROR(msg, ...) do { \
+    Log_print("FujiNet ERROR: " msg, ##__VA_ARGS__); \
+} while(0)
+
+#define FUJINET_LOG_WARN(msg, ...) do { \
+    Log_print("FujiNet WARN: " msg, ##__VA_ARGS__); \
+} while(0)
+
 /* Global variables */
 static SOCKET tcp_socket = INVALID_SOCKET;
 int fujinet_enabled = 0; /* Non-static to allow external access */
 static int motor_state = 0;
+
+/* Internal buffer for received data */
+static uint8_t fujinet_data_buffer[FUJINET_BUFFER_SIZE];
+static int fujinet_data_len = 0;
+static int fujinet_data_idx = 0;
+static int fujinet_expected_data_len = 0; /* How much data we expect after an ACK */
 
 /* Forward declarations */
 static int send_tcp_data(const uint8_t *data, int data_len);
@@ -290,41 +316,84 @@ static int send_tcp_data(const uint8_t *data, int data_len) {
 
 /* Helper function to receive data over TCP */
 static int receive_tcp_data(uint8_t *buffer, int buffer_size, int *received_len) {
-    int received;
-    
-    if (tcp_socket == INVALID_SOCKET) { 
-        return 0;
+    int total_received = 0;
+    int received_now;
+    struct timeval tv;
+    fd_set readfds;
+
+    if (tcp_socket == INVALID_SOCKET) {
+        if (received_len) *received_len = 0;
+        return 0; /* Indicate failure/not connected */
     }
-    
-    received = recv(tcp_socket, (char *)buffer, buffer_size, 0);
-    if (received == SOCKET_ERROR) {
-#ifdef HAVE_SOCKET
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            Log_print("FujiNet: Receive timeout");
-        } else {
-            Log_print("FujiNet: Receive failed: %s", strerror(errno));
-        }
-#else /* Windows */
-        int wsa_error = WSAGetLastError();
-        if (wsa_error == WSAETIMEDOUT) {
-            Log_print("FujiNet: Receive timeout");
-        } else {
-            Log_print("FujiNet: Receive failed: Error %d", wsa_error);
-        }
+
+    while (total_received < buffer_size) {
+        /* Use select() for timeout */
+        FD_ZERO(&readfds);
+        FD_SET(tcp_socket, &readfds);
+        
+        /* Set timeout (e.g., 1 second) */
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        
+        int ret = select(tcp_socket + 1, &readfds, NULL, NULL, &tv);
+        
+        if (ret == -1) { /* Error */
+            Log_print("FujiNet: select() failed: %s", strerror(errno));
+            if (received_len) *received_len = total_received;
+            return 0; /* Indicate failure */
+        } else if (ret == 0) { /* Timeout */
+            Log_print("FujiNet: Receive timeout waiting for %d bytes (got %d)", buffer_size, total_received);
+            if (received_len) *received_len = total_received;
+            return 0; /* Indicate failure due to timeout */
+        } else { /* Data available */
+#ifdef _WIN32
+            received_now = recv(tcp_socket, (char*)buffer + total_received, buffer_size - total_received, 0);
+#else
+            received_now = recv(tcp_socket, buffer + total_received, buffer_size - total_received, 0);
 #endif
-        return 0;
+
+            if (received_now < 0) { /* Error */
+#ifdef _WIN32
+                int wsa_error = WSAGetLastError();
+                if (wsa_error == WSAEWOULDBLOCK) continue; /* Shouldn't happen with select, but check */
+                Log_print("FujiNet: Receive failed: Error %d", wsa_error);
+#else
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue; /* Shouldn't happen with select, but check */
+                Log_print("FujiNet: Receive failed: %s", strerror(errno));
+#endif
+                if (received_len) *received_len = total_received;
+                return 0; /* Indicate failure */
+            }
+            
+            if (received_now == 0) { /* Connection closed */
+                Log_print("FujiNet: Connection closed by server while waiting for %d bytes (got %d)", buffer_size, total_received);
+                if (received_len) *received_len = total_received;
+                return 0; /* Indicate connection closed */
+            }
+            
+            total_received += received_now;
+        }
     }
     
-    if (received == 0) {
-        Log_print("FujiNet: Connection closed by server");
-        return 0;
-    }
-    
+    /* Successfully received buffer_size bytes */
     if (received_len != NULL) {
-        *received_len = received;
+        *received_len = total_received;
     }
     
-    return 1;
+    /* --- Log received bytes (moved from previous edit for clarity) --- */
+    Log_print("FujiNet: receive_tcp_data successfully got %d bytes:", total_received);
+    if (total_received > 0) {
+        char hex_buf[16]; 
+        int i;
+        for (i = 0; i < total_received; ++i) {
+            snprintf(hex_buf, sizeof(hex_buf), " %02X", buffer[i]);
+            Log_print(hex_buf); 
+        }
+        Log_print("\n"); 
+    }
+    /* --- END LOGGING --- */
+    
+    return 1; /* Indicate success */
 }
 
 int FujiNet_Initialise(const char *host_port) {
@@ -333,6 +402,7 @@ int FujiNet_Initialise(const char *host_port) {
     struct sockaddr_in server;
     struct hostent *he;
     struct timeval tv;
+    /* fd_set readfds; */ /* Unused in this function */
     int result;
     char *host_port_copy;
     char *port_str;
@@ -453,9 +523,20 @@ int FujiNet_Initialise(const char *host_port) {
     }
     
     Log_print("FujiNet: Connected to NetSIO hub");
-    
-    fujinet_enabled = 1; /* Set enabled directly after connect */
-    
+
+    /* Send EVENT_CONNECTED immediately after connecting */
+    uint8_t connected_event = EVENT_CONNECTED;
+    if (send_tcp_data(&connected_event, 1) <= 0) {
+        Log_print("FujiNet: Failed to send EVENT_CONNECTED");
+        /* Decide if this is fatal? Maybe log and continue? */
+        /* For now, let's continue and see what happens */
+        // closesocket(tcp_socket);
+        // tcp_socket = INVALID_SOCKET;
+        // WSACleanup();
+        // return 0; 
+    }
+
+    fujinet_enabled = 1; /* Set enabled *after* successful connection and initial message */
     Log_print("FujiNet: Device initialized successfully (assuming connection implies readiness)");
     return 1;
 }
@@ -483,121 +564,160 @@ void FujiNet_Shutdown(void) {
     fujinet_enabled = 0;
 }
 
-int FujiNet_ProcessCommand(const unsigned char *command_frame, unsigned char *response_frame) {
-    uint8_t sio_device_id;
-    uint8_t sio_command;
-    uint8_t sio_aux1;
-    uint8_t sio_aux2;
-    uint8_t sio_checksum;
-    uint8_t event, arg;
-    uint8_t sio_data[5]; /* Command, Aux1, Aux2, Checksum */
-    uint8_t response_buffer[FUJINET_BUFFER_SIZE];
-    int received_len;
-    int result;
-    
+/* Processes a 5-byte SIO command frame and returns the immediate SIO response byte (A, N, C, E). */
+UBYTE FujiNet_ProcessCommand(const UBYTE *command_frame /* Pointer to the 5-byte SIO command frame */) {
+#ifdef DEBUG_FUJINET
+    if (!command_frame) {
+        FUJINET_LOG_ERROR("ProcessCommand called with NULL command_frame.");
+        return SIO_ERROR_FRAME;
+    }
+    FUJINET_LOG_DEBUG("FujiNet_ProcessCommand called. Frame: %02X %02X %02X %02X %02X",
+                      command_frame[0], command_frame[1], command_frame[2], command_frame[3], command_frame[4]);
+#endif
+
+    /* Extract command details from the frame */
+    UBYTE sio_command = command_frame[1];
+    /* UBYTE sio_devic = command_frame[0]; */ /* Unused */
+    /* UBYTE sio_aux1 = command_frame[2]; */ /* Unused */
+    /* UBYTE sio_aux2 = command_frame[3]; */ /* Unused */
+
+    /* Check if FujiNet is enabled and connected */
     if (!fujinet_enabled || tcp_socket == INVALID_SOCKET) {
-        return 0; /* Not initialized */
+        FUJINET_LOG_ERROR("ProcessCommand called but FujiNet not enabled or connected.");
+        return SIO_NAK; /* NAK seems appropriate for device not ready */
     }
-    
-    /* Check for FujiNet device ID (0x70) */
-    sio_device_id = command_frame[0];
-    if (sio_device_id != 0x70) {
-        return 0; /* Not for us */
+
+    /* Clear any stale data from previous operations */
+    fujinet_expected_data_len = 0;
+    fujinet_data_len = 0;
+    fujinet_data_idx = 0;
+
+    /* Altirra Protocol: Send Command Sequence (4 bytes + sync) */
+    UBYTE command_sequence[5];
+    command_sequence[0] = NETSIO_SYNC;          /* Sync byte */
+    command_sequence[1] = command_frame[1];     /* Command */
+    command_sequence[2] = command_frame[2];     /* Aux1 */
+    command_sequence[3] = command_frame[3];     /* Aux2 */
+    command_sequence[4] = command_frame[1] ^ command_frame[2] ^ command_frame[3] ^ NETSIO_SYNC; /* Checksum (XOR) */
+
+    FUJINET_LOG_DEBUG("Sending command sequence: %02X %02X %02X %02X %02X",
+                      command_sequence[0], command_sequence[1], command_sequence[2], command_sequence[3], command_sequence[4]);
+
+    if (!send_tcp_data(command_sequence, 5)) {
+        FUJINET_LOG_ERROR("Failed to send command sequence to FujiNet device.");
+        /* Consider closing/resetting connection? */
+        return SIO_ERROR_FRAME; /* Error sending command */
     }
-    
-    /* Extract command components */
-    sio_command = command_frame[1];
-    sio_aux1 = command_frame[2];
-    sio_aux2 = command_frame[3];
-    sio_checksum = command_frame[4];
-    
-    Log_print("FujiNet: Processing command: %02X %02X %02X %02X %02X",
-             sio_device_id, sio_command, sio_aux1, sio_aux2, sio_checksum);
-    
-    /* Step 1: Send COMMAND_ON with device ID as arg */
-    if (!send_altirra_message(EVENT_COMMAND_ON, sio_device_id, NULL, 0)) {
-        Log_print("FujiNet: Failed to send COMMAND_ON");
-        return 0;
+
+    /* Altirra Protocol: Receive Immediate SIO Response (1 byte: A/C/N/E) */
+    UBYTE immediate_response = SIO_NAK; /* Initialize to prevent using uninitialized value if recv fails */
+    int bytes_received = recv(tcp_socket, &immediate_response, 1, 0);
+
+    if (bytes_received <= 0) {
+        if (bytes_received == 0) {
+            FUJINET_LOG_ERROR("FujiNet device closed connection while waiting for immediate response.");
+        } else {
+#ifdef _WIN32
+            FUJINET_LOG_ERROR("recv error waiting for immediate response: %d", WSAGetLastError());
+#else
+            FUJINET_LOG_ERROR("recv error waiting for immediate response: %s", strerror(errno));
+#endif
+        }
+        /* Consider closing/resetting connection? */
+        return SIO_ERROR_FRAME; /* Error receiving response */
     }
-    
-    /* Step 2: Wait for ACK */
-    if (!receive_altirra_message(EVENT_ACK, &event, &arg, NULL, 0, &received_len)) {
-        Log_print("FujiNet: No ACK for COMMAND_ON");
-        return 0;
+
+    FUJINET_LOG_DEBUG("Received immediate response: %c (0x%02X)", (immediate_response >= 32 && immediate_response <= 126) ? immediate_response : '?', immediate_response);
+
+    /* Handle response - potentially buffer data for read commands */
+    switch (immediate_response) {
+        case SIO_ACK:
+            /* Command acknowledged, data phase will follow (handled by GetByte/PutByte) */
+            /* Determine expected data length based on command */
+            switch (sio_command) {
+                case SIO_CMD_READ_SECTOR:       /* 0x52 */
+                case SIO_CMD_READ_SECTOR_HS:    /* 0xD2 */
+                    /* TODO: Get actual sector size from disk image? Assume 128 for now */
+                    fujinet_expected_data_len = 128;
+                    break;
+                case SIO_CMD_STATUS_BLOCK:      /* 0x4E */
+                    /* SpartaDOS Status Block? Check typical size */
+                     fujinet_expected_data_len = 12; /* Common size */
+                     break;
+                case SIO_CMD_DRIVE_STATUS:      /* 0x53 */
+                case SIO_CMD_DRIVE_STATUS_HS:   /* 0xD3 */
+                    fujinet_expected_data_len = 4;
+                    break;
+                 /* Commands that have a data phase FROM Atari TO FujiNet */
+                case SIO_CMD_WRITE_SECTOR:      /* 0x50 */
+                case SIO_CMD_WRITE_VERIFY:      /* 0x57 */
+                case SIO_CMD_WRITE_SECTOR_HS:   /* 0xD0 */
+                case SIO_CMD_WRITE_VERIFY_HS:   /* 0xD7 */
+                case SIO_CMD_FORMAT_DISK:       /* 0x21 */
+                case SIO_CMD_FORMAT_ENHANCED:   /* 0x22 */
+                case SIO_CMD_FORMAT_DISK_HS:    /* 0xA1 */
+                case SIO_CMD_FORMAT_ENHANCED_HS:/* 0xA2 */
+                     /* TODO: Determine expected size for writes/formats */
+                     fujinet_expected_data_len = 128; /* Assume 128 for now */
+                     break;
+                default:
+                    /* Other commands might have ACK but no data phase, or variable data */
+                    FUJINET_LOG_DEBUG("Command %02X ACKed, assuming no data phase follows.", sio_command);
+                    fujinet_expected_data_len = 0;
+                    break;
+            }
+            FUJINET_LOG_DEBUG("Command ACKed (%c), expecting %d data bytes.", immediate_response, fujinet_expected_data_len);
+            break;
+
+        case SIO_NAK:             /* NAK ('N') */
+        case SIO_ERROR_FRAME:     /* Error ('E') */
+        case SIO_COMPLETE_FRAME:  /* Complete ('C') - Should only happen after data phase? */
+            FUJINET_LOG_DEBUG("Command finished immediately with response %c.", immediate_response);
+            fujinet_expected_data_len = 0; /* No data phase */
+            break;
+
+        default:
+            FUJINET_LOG_WARN("Received unexpected immediate response: 0x%02X", immediate_response);
+            fujinet_expected_data_len = 0; /* No data expected */
+            /* Treat unexpected as NAK? Or return the byte as is? Returning it for now. */
+            break;
     }
-    
-    /* Step 3: Pack the command data and send DATA_TO_DEVICE */
-    sio_data[0] = sio_command; /* Command */
-    sio_data[1] = sio_aux1;    /* AUX1 */
-    sio_data[2] = sio_aux2;    /* AUX2 */
-    sio_data[3] = sio_checksum; /* Checksum */
-    
-    if (!send_altirra_message(EVENT_DATA_TO_DEVICE, 0, sio_data, 4)) {
-        Log_print("FujiNet: Failed to send command data");
-        return 0;
-    }
-    
-    /* Step 4: Wait for ACK */
-    if (!receive_altirra_message(EVENT_ACK, &event, &arg, NULL, 0, &received_len)) {
-        Log_print("FujiNet: No ACK for command data");
-        return 0;
-    }
-    
-    /* Step 5: Send COMMAND_OFF */
-    if (!send_altirra_message(EVENT_COMMAND_OFF, 0, NULL, 0)) {
-        Log_print("FujiNet: Failed to send COMMAND_OFF");
-        return 0;
-    }
-    
-    /* Step 6: Wait for DATA_FROM_DEVICE (the SIO response) */
-    result = receive_altirra_message(EVENT_DATA_FROM_DEVICE, &event, &arg, response_buffer, sizeof(response_buffer), &received_len);
-    if (!result) {
-        Log_print("FujiNet: No response data received");
-        return 0;
-    }
-    
-    /* Verify the response is the expected size */
-    if (received_len != 4) {
-        Log_print("FujiNet: Received wrong data size (%d bytes, expected 4)", received_len);
-        return 0;
-    }
-    
-    /* Copy the response data */
-    memcpy(response_frame, response_buffer, 4);
-    
-    return 1;
+
+    return immediate_response; /* Return the A/C/N/E code */
+
 }
 
-int FujiNet_PutByte(uint8_t byte) {
+ int FujiNet_PutByte(uint8_t byte) {
+    uint8_t data[1];
     if (!fujinet_enabled || tcp_socket == INVALID_SOCKET) {
+        return 0; /* Not connected */
+    }
+
+    /* TODO: Protocol for sending data bytes needs definition. */
+    /* Maybe send single bytes via DATA_TO_DEVICE? Or buffer and send block? */
+    /* For now, assume sending single byte via DATA_TO_DEVICE is placeholder */
+    data[0] = byte;
+    Log_print("FujiNet_PutByte: Sending byte 0x%02X (Placeholder Impl)", byte);
+    if (!send_altirra_message(EVENT_DATA_TO_DEVICE, 0, data, 1)) {
+        Log_print("FujiNet_PutByte: Failed to send byte");
         return 0;
     }
-    
-    /* Format Altirra message with the byte */
-    return send_altirra_message(EVENT_DATA_TO_DEVICE, 0, &byte, 1);
+    /* Need ACK mechanism? */
+     return 1;
 }
 
 int FujiNet_GetByte(uint8_t *byte) {
-    uint8_t data[FUJINET_BUFFER_SIZE];
-    uint8_t event, arg;
-    int received_len;
-    
-    if (!fujinet_enabled || tcp_socket == INVALID_SOCKET) {
-        return 0;
+     if (!fujinet_enabled) {
+        return 0; /* Not enabled */
     }
-    
-    /* Wait for DATA_FROM_DEVICE */
-    if (!receive_altirra_message(EVENT_DATA_FROM_DEVICE, &event, &arg, data, sizeof(data), &received_len)) {
-        return 0;
+    if (fujinet_data_idx < fujinet_data_len) {
+        *byte = fujinet_data_buffer[fujinet_data_idx++];
+        /* Log_print("FujiNet_GetByte: Returning byte %d/%d: 0x%02X", fujinet_data_idx, fujinet_data_len, *byte); */
+        return 1; /* Byte available */
+    } else {
+         /* Log_print("FujiNet_GetByte: No more data available (idx=%d, len=%d)", fujinet_data_idx, fujinet_data_len); */
+         return 0; /* No more data */
     }
-    
-    if (received_len != 1) {
-        Log_print("FujiNet: Received wrong data size (%d bytes, expected 1)", received_len);
-        return 0;
-    }
-    
-    *byte = data[0];
-    return 1;
 }
 
 void FujiNet_SetMotorState(int on) {

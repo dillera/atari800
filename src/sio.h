@@ -46,6 +46,28 @@ void SIO_Exit(void);
 #define SIO_SEROUT_INTERVAL    8
 #define SIO_ACK_INTERVAL      36
 
+/* SIO Protocol Bytes (Responses) */
+#define SIO_ACK            'A' /* 0x41 - Acknowledge */
+#define SIO_NAK            'N' /* 0x4E - Not Acknowledge / Device Error */
+#define SIO_COMPLETE_FRAME 'C' /* 0x43 - Command Complete */
+#define SIO_ERROR_FRAME    'E' /* 0x45 - SIO Error (Checksum, Timeout, Framing) */
+
+/* SIO Command Codes */
+#define SIO_CMD_READ_SECTOR       0x52 /* 'R' */
+#define SIO_CMD_WRITE_SECTOR      0x50 /* 'P' - Put sector */
+#define SIO_CMD_WRITE_VERIFY      0x57 /* 'W' - Write with Verify */
+#define SIO_CMD_STATUS_BLOCK      0x4E /* 'N' - Read Status Block (used by SpartaDOS?) */
+#define SIO_CMD_DRIVE_STATUS      0x53 /* 'S' */
+#define SIO_CMD_FORMAT_DISK       0x21 /* '!' */
+#define SIO_CMD_FORMAT_ENHANCED   0x22 /* '"' - Format Enhanced Density */
+/* High Speed Variants (e.g., XF551, Happy) */
+#define SIO_CMD_READ_SECTOR_HS    0xD2
+#define SIO_CMD_WRITE_SECTOR_HS   0xD0
+#define SIO_CMD_WRITE_VERIFY_HS   0xD7
+#define SIO_CMD_DRIVE_STATUS_HS   0xD3
+#define SIO_CMD_FORMAT_DISK_HS    0xA1
+#define SIO_CMD_FORMAT_ENHANCED_HS 0xA2
+
 /* These functions are also used by the 1450XLD Parallel disk device */
 extern int SIO_format_sectorcount[SIO_MAX_DRIVES];
 extern int SIO_format_sectorsize[SIO_MAX_DRIVES];

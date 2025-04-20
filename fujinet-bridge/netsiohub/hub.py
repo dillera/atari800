@@ -212,9 +212,12 @@ class NetSIOServer(socketserver.UDPServer):
         return client
 
     def send_to_client(self, client:NetSIOClient, msg):
-        log_trace(f"NetSIOServer.send_to_client: Sending msg {msg} via UDP to {addrtos(client.address)}")
+        # Only log if it's not an ALIVE response to reduce noise
+        if msg.id != NETSIO_ALIVE_RESPONSE:
+            log_trace(f"NetSIOServer.send_to_client: Sending msg {msg} via UDP to {addrtos(client.address)}")
         client.sock.sendto(struct.pack('B', msg.id) + msg.arg, client.address)
-        debug_print("> NET {} {}".format(addrtos(client.address), msg))
+        # Keep debug_print active for now, or comment if needed
+        # debug_print("> NET {} {}".format(addrtos(client.address), msg))
 
     def send_to_all(self, msg):
         """broadcast all connected netsio devices"""
@@ -303,11 +306,18 @@ class NetSIOHandler(socketserver.BaseRequestHandler):
                     NetSIOMsg(NETSIO_PING_RESPONSE)
                 )
             elif msg.id == NETSIO_ALIVE_REQUEST:
-                # alive, send alive response (only if connected/registered)
+                # log_trace(f"NetSIOHandler received NETSIO_ALIVE_REQUEST: {msg}") # Commented out to reduce noise
                 client = self.server.get_client(self.client_address)
                 if client is not None:
                     client.refresh()
-                    self.server.send_to_client(client, NetSIOMsg(NETSIO_ALIVE_RESPONSE))
+                    # Try to update credit if payload exists
+                    if msg.arg and len(msg.arg) > 0: 
+                        client.update_credit(msg.arg[0]) # Try updating credit, ignore result for response
+                    else:
+                        pass # log_trace(f"NetSIOHandler: Received NETSIO_ALIVE_REQUEST with empty msg.arg from {client.address}") # Commented out
+                    
+                    # Always send ALIVE response regardless of payload content
+                    self.server.send_to_client(client, NetSIOMsg(NETSIO_ALIVE_RESPONSE)) 
             elif msg.id == NETSIO_CREDIT_STATUS:
                 client = self.server.get_client(self.client_address)
                 if client is not None and len(msg.arg):
@@ -687,8 +697,12 @@ class AtDevThread(threading.Thread):
             try:
                 # Blocking wait with timeout
                 msg = self.queue.get(timeout=1.0/50) # try approx. every frame
+                log_trace(f"AtDevThread received msg from queue: {msg}") # Log the raw message
+                if msg is None:
+                    log_trace("AtDevThread received None, likely stopping.")
+                    continue # Skip processing if None
                 try:
-                    msglen = len(msg.arg)
+                    msglen = len(msg.arg) # Now safe to access msg.arg
                     if msglen > 0:
                         # Altirra protocol requires a separate message for each byte
                         data = msg.arg
@@ -697,13 +711,13 @@ class AtDevThread(threading.Thread):
                             if not self.atdev_handler.atdev_ready.wait(0.100):
                                 break
                             # Send one byte at a time to client
-                            self.atdev_handler.send_msg(NETSIO_DATA_BYTE, b, msg.time)
+                            self.atdev_handler.send_altirra_response(NETSIO_DATA_BYTE, b, timestamp=msg.time)
                             # Don't flood the connection
                             time.sleep(0.001)
                     # For non-data messages, just send the event code
-                    elif msg.id != NETSIO_CREDIT_ACK:
+                    elif msg.id != NETSIO_CREDIT_UPDATE: # Fixed constant name
                         log_trace(f"AtDevThread: sending event 0x{msg.id:02X}")
-                        self.atdev_handler.send_msg(msg.id, 0, msg.time)
+                        self.atdev_handler.send_altirra_response(msg.id, 0, timestamp=msg.time) # Fixed method call
                 finally:
                     self.queue.task_done()
             except queue.Empty:

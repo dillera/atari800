@@ -38,32 +38,21 @@
 #include "compfile.h"
 #include "cpu.h"
 #include "esc.h"
+#include "fujinet.h"
 #include "log.h"
 #include "memory.h"
 #include "platform.h"
 #include "pokey.h"
 #include "pokeysnd.h"
 #include "sio.h"
-#include "util.h"
-#ifndef BASIC
 #include "statesav.h"
-#endif
-#ifdef USE_FUJINET
-#include "fujinet.h"
-extern int fujinet_enabled; /* Defined in fujinet.c */
-#endif
+#include "util.h"
 
 /* SIO Status Codes (internal) */
 #define SIO_OK             0
 #define SIO_ERROR          1
 #define SIO_COMPLETE       2
 #define SIO_CHECKSUM_ERROR 3
-
-/* SIO Protocol Bytes */
-#define SIO_ACK            'A'
-#define SIO_NAK            'N'
-#define SIO_COMPLETE_FRAME 'C'
-#define SIO_ERROR_FRAME    'E'
 
 #define SIO_BUFFER_SIZE    132 /* Command frame (4) + Max data (128) */
 
@@ -220,6 +209,7 @@ int SIO_Initialise(int *argc, char *argv[])
 	/* Initialize FujiNet with default settings */
 	printf("\n\n***** ATTEMPTING TO INITIALIZE FUJINET *****\n");
 	fflush(stdout);
+	/* Use host:port provided on command line, if any */
 	if (FujiNet_Initialise(NULL)) {
 		printf("***** FUJINET INITIALIZED SUCCESSFULLY *****\n");
 		fflush(stdout);
@@ -773,6 +763,8 @@ int SIO_WriteSector(int unit, int sector, const UBYTE *buffer /* UNUSED */)
 {
 	int size;
 	ULONG offset;
+	int i;
+	(void)i; /* Suppress unused variable warning */
 
 	if (SIO_drive_status[unit] == SIO_READ_ONLY || disk[unit] == NULL)
 		return FALSE;
@@ -928,125 +920,136 @@ int SIO_DriveStatus(int unit, UBYTE *buffer /* UNUSED */)
 
 static int Command_Frame(UBYTE *data_buffer)
 {
-	int data_len;
-	UBYTE checksum;
-	int frame_resent = 0;
-	int timeout = 15;
-	static int last_atari_frame_num = -1; /* Redeclare */
-	int atari_frame_num;
-	int i;
 #ifdef USE_FUJINET
-	unsigned char response_frame[4]; /* For FujiNet response */
-#endif
+    /* FujiNet Path: Bypass original checksum, SIO_Handler, and result logic. */
 
-	(void)timeout; /* Suppress unused variable warning */
+    /* Check device ID (Allow D1: 0x31 and FujiNet device 0x70) */
+    if (data_buffer[0] != 0x31 && data_buffer[0] != 0x70) {
+        Log_print("SIO: FujiNet Command_Frame received for unsupported Device ID: 0x%02X", data_buffer[0]);
+        SIO_PutByte(SIO_NAK); /* Send NAK for wrong device */
+        TransferStatus = SIO_NoFrame;
+        CommandIndex = 0;
+        return SIO_ERROR; /* Indicate error */
+    }
 
-	/* Check device ID */
-#ifdef USE_FUJINET
-	if (data_buffer[0] != 0x31 && data_buffer[0] != 0x70) { /* Allow both D1: and FujiNet devices */
-#else
-	if (data_buffer[0] != 0x31) { /* Only device D1: supported for now */
-#endif
-		SIO_last_result = SIO_ERROR;
-		return SIO_last_result;
-	}
+    Log_print("SIO: Processing Command Frame via FujiNet: %02X %02X %02X %02X %02X",
+              data_buffer[0], data_buffer[1], data_buffer[2], data_buffer[3], data_buffer[4]);
 
-	if (SIO_FrameCounter == 0) {
-		/* Init */
-		SIO_FrameCounter = 1;
-	}
+    /* --- Call FujiNet to process the command --- */
+    /* NOTE: Assumes FujiNet_ProcessCommand is modified to: */
+    /* 1. Return the SIO response byte ('A', 'C', 'E', 'N') */
+    /* 2. Internally buffer any data for subsequent FujiNet_GetByte calls */
+    UBYTE fujinet_response_byte;
+    fujinet_response_byte = FujiNet_ProcessCommand(
+        data_buffer  /* Pass the 5-byte command directly */
+    );
+    /* --- End FujiNet Call --- */
 
-	SIO_FrameCounter++;
-	atari_frame_num = data_buffer[0];
-	if (atari_frame_num == last_atari_frame_num) {
-		/* OS is resending the same frame */
-		frame_resent = TRUE;
-	}
-	last_atari_frame_num = atari_frame_num;
+    /* Send the immediate response byte from FujiNet */
+    SIO_PutByte(fujinet_response_byte);
 
-	/* Get data length */
-	data_len = data_buffer[1];
-	if (data_len > SIO_BUFFER_SIZE - 2) {
-		SIO_last_result = SIO_CHECKSUM_ERROR;
-		goto SendResult;
-	}
+    /* Reset SIO state machine; FujiNet handles data transfer phase via Get/Put Byte */
+    TransferStatus = SIO_NoFrame;
+    CommandIndex = 0; /* Reset index for next command */
 
-#ifdef USE_FUJINET
-	/* Check if FujiNet is enabled and should handle this command */
-	if (fujinet_enabled) {
-		/* Try to process the command with FujiNet */
-		if (FujiNet_ProcessCommand(data_buffer, response_frame)) {
-			/* Command was processed by FujiNet */
-			/* Map FujiNet response to SIO result codes */
-			switch (response_frame[0]) {
-			case 'A': /* ACK */
-				SIO_last_result = SIO_OK;
-				break;
-			case 'C': /* COMPLETE */
-				SIO_last_result = SIO_COMPLETE;
-				break;
-			case 'E': /* ERROR */
-				SIO_last_result = SIO_ERROR;
-				break;
-			case 'N': /* NAK */
-				SIO_last_result = SIO_CHECKSUM_ERROR;
-				break;
-			default:
-				SIO_last_result = SIO_ERROR;
-				break;
-			}
-			goto SendResult;
-		}
-		/* If FujiNet didn't handle it, continue with regular SIO processing */
-	}
-#endif
+    /* Determine return value based on response */
+    if (fujinet_response_byte == SIO_ACK || fujinet_response_byte == SIO_COMPLETE_FRAME) {
+        return SIO_OK; /* Indicate success to caller (SIO_PutByte state machine) */
+    } else {
+        return SIO_ERROR; /* Indicate error/NAK */
+    }
+#else /* Original SIO Logic */
+#endif /* USE_FUJINET */
+ 	int data_len;
+ 	UBYTE checksum;
+ 	int frame_resent = 0;
+ 	int timeout = 15;
+ 	static int last_atari_frame_num = -1; /* Redeclare */
+ 	int atari_frame_num;
+ 	int i;
 
-	/* Verify checksum */
-	checksum = 0;
-	/* C89: Use pre-declared i */
-	for (i = 0; i < data_len; i++) {
-		checksum += data_buffer[i + 2];
-	}
+ 	(void)timeout; /* Suppress unused variable warning */
 
-	if (checksum != data_buffer[data_len + 2]) {
-		/* Checksum error */
-		SIO_last_result = SIO_CHECKSUM_ERROR;
-		goto SendResult;
-	}
+ 	Log_print("SIO: Command_Frame received Device ID: 0x%02X", data_buffer[0]);
 
-	/* Command frame looks ok. Process it */
-	memcpy(DataBuffer, data_buffer + 2, data_len);
+ 	/* Check device ID */
+ #ifdef USE_FUJINET
+ 	if (data_buffer[0] != 0x31 && data_buffer[0] != 0x70) { /* Allow both D1: and FujiNet devices */
+ #else
+ 	if (data_buffer[0] != 0x31) { /* Only device D1: supported for now */
+ #endif
+ 		SIO_last_result = SIO_ERROR;
+ 		return SIO_last_result;
+ 	}
 
-	/* Call SIO_Handler (which operates on global DataBuffer) */
-	/* SIO_Handler is void, but sets the global SIO_last_result */
-	SIO_Handler();
+ 	if (SIO_FrameCounter == 0) {
+ 		/* Init */
+ 		SIO_FrameCounter = 1;
+ 	}
 
-SendResult:
-	/* Now send the result frame back */
-	if (SIO_last_result == SIO_OK) {
-		/* Send Acknowledge */
-		SIO_PutByte(SIO_ACK);
-	}
-	else if (SIO_last_result == SIO_ERROR) {
-		/* Send Error */
-		SIO_PutByte(SIO_ERROR_FRAME);
-	}
-	else if (SIO_last_result == SIO_COMPLETE) {
-		/* Send Complete */
-		SIO_PutByte(SIO_COMPLETE_FRAME);
-	}
-	else if (SIO_last_result == SIO_CHECKSUM_ERROR) {
-		/* Send NAK */
-		SIO_PutByte(SIO_NAK);
-	}
-	else {
-		/* Should not happen */
-		SIO_PutByte(SIO_ERROR_FRAME);
-	}
-	return SIO_last_result;
-}
+ 	SIO_FrameCounter++;
+ 	atari_frame_num = data_buffer[0];
+ 	if (atari_frame_num == last_atari_frame_num) {
+ 		/* OS is resending the same frame */
+ 		frame_resent = TRUE;
+ 	}
+ 	last_atari_frame_num = atari_frame_num;
 
-/* Enable/disable the command frame */
+ 	/* Get data length */
+ 	data_len = data_buffer[1];
+ 	if (data_len > SIO_BUFFER_SIZE - 2) {
+ 		SIO_last_result = SIO_CHECKSUM_ERROR;
+ 		goto SendResult;
+ 	}
+
+ 	/* Verify checksum */
+ 	checksum = 0;
+ 	/* C89: Use pre-declared i */
+ 	for (i = 0; i < data_len; i++, data_buffer++) {
+ 		checksum += *data_buffer;
+ 		while (checksum > 255)
+ 			checksum -= 255;
+ 	}
+
+ 	if (checksum != data_buffer[data_len]) {
+ 		/* Checksum error */
+ 		SIO_last_result = SIO_CHECKSUM_ERROR;
+ 		goto SendResult;
+ 	}
+
+ 	/* Command frame looks ok. Process it */
+ 	memcpy(DataBuffer, data_buffer - data_len, data_len);
+
+ 	/* Call SIO_Handler (which operates on global DataBuffer) */
+ 	/* SIO_Handler is void, but sets the global SIO_last_result */
+ 	SIO_Handler();
+
+ SendResult:
+ 	/* Now send the result frame back */
+ 	if (SIO_last_result == SIO_OK) {
+ 		/* Send Acknowledge */
+ 		SIO_PutByte(SIO_ACK);
+ 	}
+ 	else if (SIO_last_result == SIO_ERROR) {
+ 		/* Send Error */
+ 		SIO_PutByte(SIO_ERROR_FRAME);
+ 	}
+ 	else if (SIO_last_result == SIO_COMPLETE) {
+ 		/* Send Complete */
+ 		SIO_PutByte(SIO_COMPLETE_FRAME);
+ 	}
+ 	else if (SIO_last_result == SIO_CHECKSUM_ERROR) {
+ 		/* Send NAK */
+ 		SIO_PutByte(SIO_NAK);
+ 	}
+ 	else {
+ 		/* Should not happen */
+ 		SIO_PutByte(SIO_ERROR_FRAME);
+ 	}
+ 	return SIO_last_result;
+ }
+
+ /* Enable/disable the command frame */
 void SIO_SwitchCommandFrame(int onoff)
 {
 	if (onoff)
@@ -1070,412 +1073,462 @@ static int last_ypos = 0;
 void SIO_Handler(void)
 {
 	int sector = MEMORY_dGetWordAligned(0x30a);
-	int unit = MEMORY_dGetByte(0x300) + MEMORY_dGetByte(0x301) + 0xff;
+	int unit;
 	UBYTE result = 0x00;
 	UWORD data = MEMORY_dGetWordAligned(0x304);
 	int length = MEMORY_dGetWordAligned(0x308);
 	int realsize = 0;
 	int cmd = MEMORY_dGetByte(0x302);
+    UBYTE sio_devic = MEMORY_dGetByte(0x300);
+    UBYTE sio_unit = MEMORY_dGetByte(0x301);
+    UBYTE sio_aux1 = MEMORY_dGetByte(0x30a); /* Low byte of sector/aux */
+    UBYTE sio_aux2 = MEMORY_dGetByte(0x30b); /* High byte of sector/aux */
 
-	if ((unsigned int)MEMORY_dGetByte(0x300) + (unsigned int)MEMORY_dGetByte(0x301) > 0xff) {
-		/* carry */
-		unit++;
-	}
-	/* A real atari just adds the bytes and 0xff. The result could wrap.*/
-	/* XL OS: E99D: LDA $0300 ADC $0301 ADC #$FF STA 023A */
+#ifdef USE_FUJINET
+    /* Check for FujiNet device ID (0x70) */
+    UBYTE fujinet_response_byte = SIO_NAK; /* Declare response byte here for wider scope */
+    if (sio_devic == 0x70 && fujinet_enabled) {
+        UBYTE fuji_command_frame[5];
+        UBYTE fuji_sio_status[4];
+        UBYTE fuji_data_buffer[FUJINET_BUFFER_SIZE]; /* Use FujiNet's max buffer */
+        int fuji_bytes_received = 0;
+        UBYTE fuji_result;
+        
+        Log_print("SIO: Detected FujiNet device (0x70), attempting FujiNet command...");
+        
+        /* Assemble command frame */
+        fuji_command_frame[0] = sio_devic; 
+        fuji_command_frame[1] = cmd;
+        fuji_command_frame[2] = sio_aux1;
+        fuji_command_frame[3] = sio_aux2;
+        fuji_command_frame[4] = SIO_ChkSum(fuji_command_frame, 4); /* Checksum of first 4 bytes */
+        
+        fuji_result = FujiNet_ProcessCommand(
+            fuji_command_frame /* Pass the 5-byte command directly */
+        );
+        /* --- End FujiNet Call --- */
 
-	/* The OS SIO routine copies decide ID do CDEVIC, command ID to CCOMND etc.
-	   This operation is not needed with the SIO patch enabled, but we perform
-	   it anyway, since some programs rely on that. (E.g. the E.T Phone Home!
-	   cartridge would crash with SIO patch enabled.)
-	   Note: While on a real XL OS the copying is done only for SIO devices
-	   (not for PBI ones), here we copy the values for all types of devices -
-	   it's probably harmless. */
-	MEMORY_dPutByte(0x023a, unit); /* sta CDEVIC */
-	MEMORY_dPutByte(0x023b, cmd); /* sta CCOMND */
-	MEMORY_dPutWordAligned(0x023c, sector); /* sta CAUX1; sta CAUX2 */
+        /* Send the immediate response byte from FujiNet */
+        SIO_PutByte(fuji_result);
 
-	/* Disk 1 is ASCII '1' = 0x31 etc */
-	/* Disk 1 -> unit = 0 */
-	unit -= 0x31;
+        /* Reset SIO state machine; FujiNet handles data transfer phase via Get/Put Byte */
+        TransferStatus = SIO_NoFrame;
+        CommandIndex = 0; /* Reset index for next command */
 
-	if (MEMORY_dGetByte(0x300) != 0x60 && unit < 8 && (SIO_drive_status[unit] != SIO_OFF || BINLOAD_start_binloading)) {	/* UBYTE range ! */
+        /* Determine return value based on response */
+        if (fuji_result == SIO_ACK || fuji_result == SIO_COMPLETE_FRAME) {
+            return; /* Indicate success to caller (SIO_PutByte state machine) */
+        } else {
+            return; /* Indicate error/NAK */
+        }
+    } else {
+#endif /* USE_FUJINET */
+        /* Original SIO Handling starts here */
+        UBYTE unit;
+        int realsize;
+        UBYTE result = 'N';
+        unit = sio_devic + sio_unit + 0xff;
+
+        if ((unsigned int)sio_devic + (unsigned int)sio_unit > 0xff) {
+            /* carry */
+            unit++;
+        }
+        /* A real atari just adds the bytes and 0xff. The result could wrap.*/
+        /* XL OS: E99D: LDA $0300 ADC $0301 ADC #$FF STA 023A */
+
+        /* The OS SIO routine copies decide ID do CDEVIC, command ID to CCOMND etc.
+           This operation is not needed with the SIO patch enabled, but we perform
+           it anyway, since some programs rely on that. (E.g. the E.T Phone Home!
+           cartridge would crash with SIO patch enabled.)
+           Note: While on a real XL OS the copying is done only for SIO devices
+           (not for PBI ones), here we copy the values for all types of devices -
+           it's probably harmless. */
+        MEMORY_dPutByte(0x023a, unit); /* sta CDEVIC */
+        MEMORY_dPutByte(0x023b, cmd); /* sta CCOMND */
+        MEMORY_dPutWordAligned(0x023c, sector); /* sta CAUX1; sta CAUX2 */
+
+        /* Disk 1 is ASCII '1' = 0x31 etc */
+        /* Disk 1 -> unit = 0 */
+        unit -= 0x31;
+
+        if (MEMORY_dGetByte(0x300) != 0x60 && unit < 8 && (SIO_drive_status[unit] != SIO_OFF || BINLOAD_start_binloading)) {    /* UBYTE range ! */
 
 # ifdef DEBUG
-Log_print("SIO disk command is %02x %02x %02x %02x %02x   %02x %02x %02x %02x %02x %02x",
-			cmd, MEMORY_dGetByte(0x303), MEMORY_dGetByte(0x304), MEMORY_dGetByte(0x305), MEMORY_dGetByte(0x306),
-			MEMORY_dGetByte(0x308), MEMORY_dGetByte(0x309), MEMORY_dGetByte(0x30a), MEMORY_dGetByte(0x30b),
-			MEMORY_dGetByte(0x30c), MEMORY_dGetByte(0x30d));
+    Log_print("SIO disk command is %02x %02x %02x %02x %02x   %02x %02x %02x %02x %02x %02x",
+            cmd, MEMORY_dGetByte(0x303), MEMORY_dGetByte(0x304), MEMORY_dGetByte(0x305), MEMORY_dGetByte(0x306),
+            MEMORY_dGetByte(0x308), MEMORY_dGetByte(0x309), MEMORY_dGetByte(0x30a), MEMORY_dGetByte(0x30b),
+            MEMORY_dGetByte(0x30c), MEMORY_dGetByte(0x30d));
 
 # endif
-switch (cmd) {
-		case 0x4e:				/* Read Status Block */
-			if (12 == length) {
-				result = SIO_ReadStatusBlock(unit, DataBuffer);
-				if (result == 'C')
-					MEMORY_CopyToMem(DataBuffer, data, 12);
-			}
-			else
-				result = 'E';
-			break;
-		case 0x4f:				/* Write Status Block */
-			if (12 == length) {
-				MEMORY_CopyFromMem(data, DataBuffer, 12);
-				result = SIO_WriteStatusBlock(unit, DataBuffer);
-			}
-			else
-				result = 'E';
-			break;
-		case 0x50:				/* Write */
-		case 0x57:
-		case 0xD0:				/* xf551 hispeed */
-		case 0xD7:
-			SIO_SizeOfSector((UBYTE)unit, sector, &realsize, NULL);
-			if (realsize == length) {
-				MEMORY_CopyFromMem(data, DataBuffer, realsize);
-				result = SIO_WriteSector(unit, sector, DataBuffer);
-			}
-			else
-				result = 'E';
-			break;
-		case 0x52:				/* Read */
-		case 0xD2:				/* xf551 hispeed */
+        switch (cmd) {
+            case 0x4e:                /* Read Status Block */
+                if (12 == length) {
+                    result = SIO_ReadStatusBlock(unit, DataBuffer);
+                    if (result == 'C')
+                        MEMORY_CopyToMem(DataBuffer, data, 12);
+                }
+                else
+                    result = 'E';
+                break;
+            case 0x4f:                /* Write Status Block */
+                if (12 == length) {
+                    MEMORY_CopyFromMem(data, DataBuffer, 12);
+                    result = SIO_WriteStatusBlock(unit, DataBuffer);
+                }
+                else
+                    result = 'E';
+                break;
+            case 0x50:                /* Write */
+            case 0x57:
+            case 0xD0:                /* xf551 hispeed */
+            case 0xD7:
+                SIO_SizeOfSector((UBYTE)unit, sector, &realsize, NULL);
+                if (realsize == length) {
+                    MEMORY_CopyFromMem(data, DataBuffer, realsize);
+                    result = SIO_WriteSector(unit, sector, DataBuffer);
+                }
+                else
+                    result = 'E';
+                break;
+            case 0x52:                /* Read */
+            case 0xD2:                /* xf551 hispeed */
 
 # ifndef NO_SECTOR_DELAY
-if (sector == 1) {
-				if (delay_counter > 0) {
-					if (last_ypos != ANTIC_ypos) {
-						last_ypos = ANTIC_ypos;
-						delay_counter--;
-					}
-					CPU_regPC = 0xe459;	/* stay at SIO patch */
-					return;
-				}
-				delay_counter = SECTOR_DELAY;
-			}
-			else {
-				delay_counter = 0;
-			}
+    if (sector == 1) {
+                if (delay_counter > 0) {
+                    if (last_ypos != ANTIC_ypos) {
+                        last_ypos = ANTIC_ypos;
+                        delay_counter--;
+                    }
+                    CPU_regPC = 0xe459;    /* stay at SIO patch */
+                    return;
+                }
+                delay_counter = SECTOR_DELAY;
+            }
+            else {
+                delay_counter = 0;
+            }
 # endif
-SIO_SizeOfSector((UBYTE)unit, sector, &realsize, NULL);
-			if (realsize == length) {
-				result = SIO_ReadSector(unit, sector, DataBuffer);
-				if (result == 'C')
-					MEMORY_CopyToMem(DataBuffer, data, realsize);
-			}
-			else
-				result = 'E';
-			break;
-		case 0x53:				/* Status */
-		case 0xD3:				/* xf551 hispeed */
-			if (4 == length) {
-				result = SIO_DriveStatus(unit, DataBuffer);
-				if (result == 'C') {
-					MEMORY_CopyToMem(DataBuffer, data, 4);
-				}
-			}
-			else
-				result = 'E';
-			break;
-		/*case 0x66:*/			/* US Doubler Format - I think! */
-		case 0x21:				/* Format Disk */
-		case 0xA1:				/* xf551 hispeed */
-			realsize = SIO_format_sectorsize[unit];
-			if (realsize == length) {
-				result = SIO_FormatDisk(unit, DataBuffer, realsize, SIO_format_sectorcount[unit]);
-				if (result == 'C')
-					MEMORY_CopyToMem(DataBuffer, data, realsize);
-			}
-			else {
-				/* there are programs which send the format-command but don't wait for the result (eg xf-tools) */
-				SIO_FormatDisk(unit, DataBuffer, realsize, SIO_format_sectorcount[unit]);
-				result = 'E';
-			}
-			break;
-		case 0x22:				/* Enhanced Density Format */
-		case 0xA2:				/* xf551 hispeed */
-			realsize = 128;
-			if (realsize == length) {
-				result = SIO_FormatDisk(unit, DataBuffer, 128, 1040);
-				if (result == 'C')
-					MEMORY_CopyToMem(DataBuffer, data, realsize);
-			}
-			else {
-				SIO_FormatDisk(unit, DataBuffer, 128, 1040);
-				result = 'E';
-			}
-			break;
-		default:
-			result = 'N';
-		}
-	}
-	/* cassette i/o */
-	else if (MEMORY_dGetByte(0x300) == 0x60) {
-		UBYTE gaps = MEMORY_dGetByte(0x30b);
-		switch (cmd){
-		case 0x52:	/* read */
-			/* set expected Gap */
-			CASSETTE_AddGap(gaps == 0 ? 2000 : 160);
-			/* get record from storage medium */
-			if (CASSETTE_ReadToMemory(data, length))
-				result = 'C';
-			else
-				result = 'E';
-			break;
-		case 0x50:	/* put (used by AltirraOS) */
-		case 0x57:	/* write (used by Atari OS) */
-			/* add pregap length */
-			CASSETTE_AddGap(gaps == 0 ? 3000 : 260);
-			/* write full record to storage medium */
-			if (CASSETTE_WriteFromMemory(data, length))
-				result = 'C';
-			else
-				result = 'E';
-			break;
-		default:
-			result = 'N';
-		}
-	}
+    SIO_SizeOfSector((UBYTE)unit, sector, &realsize, NULL);
+                if (realsize == length) {
+                    result = SIO_ReadSector(unit, sector, DataBuffer);
+                    if (result == 'C')
+                        MEMORY_CopyToMem(DataBuffer, data, realsize);
+                }
+                else
+                    result = 'E';
+                break;
+            case 0x53:                /* Status */
+            case 0xD3:                /* xf551 hispeed */
+                if (4 == length) {
+                    result = SIO_DriveStatus(unit, DataBuffer);
+                    if (result == 'C') {
+                        MEMORY_CopyToMem(DataBuffer, data, 4);
+                    }
+                }
+                else
+                    result = 'E';
+                break;
+            /*case 0x66:*/            /* US Doubler Format - I think! */
+            case 0x21:                /* Format Disk */
+            case 0xA1:                /* xf551 hispeed */
+                realsize = SIO_format_sectorsize[unit];
+                if (realsize == length) {
+                    result = SIO_FormatDisk(unit, DataBuffer, realsize, SIO_format_sectorcount[unit]);
+                    if (result == 'C')
+                        MEMORY_CopyToMem(DataBuffer, data, realsize);
+                }
+                else {
+                    /* there are programs which send the format-command but don't wait for the result (eg xf-tools) */
+                    SIO_FormatDisk(unit, DataBuffer, realsize, SIO_format_sectorcount[unit]);
+                    result = 'E';
+                }
+                break;
+            case 0x22:                /* Enhanced Density Format */
+            case 0xA2:                /* xf551 hispeed */
+                realsize = 128;
+                if (realsize == length) {
+                    result = SIO_FormatDisk(unit, DataBuffer, 128, 1040);
+                    if (result == 'C')
+                        MEMORY_CopyToMem(DataBuffer, data, realsize);
+                }
+                else {
+                    SIO_FormatDisk(unit, DataBuffer, 128, 1040);
+                    result = 'E';
+                }
+                break;
+            default:
+                result = 'N';
+        }
+        }
+        /* cassette i/o */
+        else if (MEMORY_dGetByte(0x300) == 0x60) {
+            UBYTE gaps = MEMORY_dGetByte(0x30b);
+            switch (cmd){
+            case 0x52:    /* read */
+                /* set expected Gap */
+                CASSETTE_AddGap(gaps == 0 ? 2000 : 160);
+                /* get record from storage medium */
+                if (CASSETTE_ReadToMemory(data, length))
+                    result = 'C';
+                else
+                    result = 'E';
+                break;
+            case 0x50:    /* put (used by AltirraOS) */
+            case 0x57:    /* write (used by Atari OS) */
+                /* add pregap length */
+                CASSETTE_AddGap(gaps == 0 ? 3000 : 260);
+                /* write full record to storage medium */
+                if (CASSETTE_WriteFromMemory(data, length))
+                    result = 'C';
+                else
+                    result = 'E';
+                break;
+            default:
+                result = 'N';
+            }
+        }
 
-	switch (result) {
-	case 0x00:					/* Device disabled, generate timeout */
-		CPU_regY = 138; /* TIMOUT: peripheral device timeout error */
-		CPU_SetN;
-		break;
-	case 'A':					/* Device acknowledge */
-	case 'C':					/* Operation complete */
-		CPU_regY = 1; /* SUCCES: successful operation */
-		CPU_ClrN;
-		break;
-	case 'N':					/* Device NAK */
-		CPU_regY = 139; /* DNACK: device does not acknowledge command error */
-		CPU_SetN;
-		break;
-	case 'E':					/* Device error */
-		CPU_regY = 144; /* DERROR: device done (operation incomplete) error */
-		CPU_SetN;
-		break;
-	default:
-		CPU_regY = 146; /* FNCNOT: function not implemented in handler error */
-		CPU_SetN;
-		break;
-	}
-	CPU_regA = 0;	/* MMM */
-	MEMORY_dPutByte(0x0303, CPU_regY);
-	MEMORY_dPutByte(0x42,0);
-	CPU_SetC;
+        switch (result) {
+        case 0x00:                    /* Device disabled, generate timeout */
+            CPU_regY = 138; /* TIMOUT: peripheral device timeout error */
+            CPU_SetN;
+            break;
+        case 'A':                    /* Device acknowledge */
+        case 'C':                    /* Operation complete */
+            CPU_regY = 1; /* SUCCES: successful operation */
+            CPU_ClrN;
+            break;
+        case 'N':                    /* Device NAK */
+            CPU_regY = 139; /* DNACK: device does not acknowledge command error */
+            CPU_SetN;
+            break;
+        case 'E':                    /* Device error */
+            CPU_regY = 144; /* DERROR: device done (operation incomplete) error */
+            CPU_SetN;
+            break;
+        default:
+            CPU_regY = 146; /* FNCNOT: function not implemented in handler error */
+            CPU_SetN;
+            break;
+        }
+        CPU_regA = 0;    /* MMM */
+        MEMORY_dPutByte(0x0303, CPU_regY);
+        MEMORY_dPutByte(0x42,0);
+        CPU_SetC;
 
-	/* After each SIO operation a routine called SENDDS ($EC5F in OSB) is
-	   invoked, which, among other functions, silences the sound
-	   generators. With SIO patch we don't call SIOV and in effect SENDDS
-	   is not called either, but this causes a problem with tape saving.
-	   During tape saving sound generators are enabled before calling
-	   SIOV, but are not disabled later (no call to SENDDS). The effect is
-	   that after saving to tape the unwanted SIO sounds are left audible.
-	   To avoid the problem, we silence the sound registers by hand. */
-	POKEY_PutByte(POKEY_OFFSET_AUDC1, 0);
-	POKEY_PutByte(POKEY_OFFSET_AUDC2, 0);
-	POKEY_PutByte(POKEY_OFFSET_AUDC3, 0);
-	POKEY_PutByte(POKEY_OFFSET_AUDC4, 0);
+        /* After each SIO operation a routine called SENDDS ($EC5F in OSB) is
+           invoked, which, among other functions, silences the sound
+           generators. With SIO patch we don't call SIOV and in effect SENDDS
+           is not called either, but this causes a problem with tape saving.
+           During tape saving sound generators are enabled before calling
+           SIOV, but are not disabled later (no call to SENDDS). The effect is
+           that after saving to tape the unwanted SIO sounds are left audible.
+           To avoid the problem, we silence the sound registers by hand. */
+        POKEY_PutByte(POKEY_OFFSET_AUDC1, 0);
+        POKEY_PutByte(POKEY_OFFSET_AUDC2, 0);
+        POKEY_PutByte(POKEY_OFFSET_AUDC3, 0);
+        POKEY_PutByte(POKEY_OFFSET_AUDC4, 0);
+    }
 }
 
-UBYTE SIO_ChkSum(const UBYTE *buffer, int length)
-{
+ UBYTE SIO_ChkSum(const UBYTE *buffer, int length)
+ {
 
 # if 0
 /* old, less efficient version */
-	int i;
-	int checksum = 0;
-	for (i = 0; i < length; i++, buffer++) {
-		checksum += *buffer;
-		while (checksum > 255)
-			checksum -= 255;
-	}
+    int i;
+    int checksum = 0;
+    for (i = 0; i < length; i++, buffer++) {
+        checksum += *buffer;
+        while (checksum > 255)
+            checksum -= 255;
+    }
 
 # else
-int checksum = 0;
-	while (--length >= 0)
-		checksum += *buffer++;
-	do
-		checksum = (checksum & 0xff) + (checksum >> 8);
-	while (checksum > 255);
+    int checksum = 0;
+    while (--length >= 0)
+        checksum += *buffer++;
+    do
+        checksum = (checksum & 0xff) + (checksum >> 8);
+    while (checksum > 255);
 # endif
-	return checksum;
-}
+    return checksum;
+ }
 
 
 static UBYTE WriteSectorBack(void)
 {
-	UWORD sector;
-	int unit;
+    UWORD sector;
+    int unit;
 
-	sector = CommandFrame[2] + (CommandFrame[3] << 8);
-	unit = CommandFrame[0] - '1';
-	if (unit >= 8)		/* UBYTE range ! */
-		return 0;
-	switch (CommandFrame[1]) {
-	case 0x4f:				/* Write Status Block */
-		return SIO_WriteStatusBlock(unit, DataBuffer);
-	case 0x50:				/* Write */
-	case 0x57:
-	case 0xD0:				/* xf551 hispeed */
-	case 0xD7:
-		return SIO_WriteSector(unit, sector, DataBuffer);
-	default:
-		return 'E';
-	}
+    sector = CommandFrame[2] + (CommandFrame[3] << 8);
+    unit = CommandFrame[0] - '1';
+    if (unit >= 8)        /* UBYTE range ! */
+        return 0;
+    switch (CommandFrame[1]) {
+    case 0x4f:                /* Write Status Block */
+        return SIO_WriteStatusBlock(unit, DataBuffer);
+    case 0x50:                /* Write */
+    case 0x57:
+    case 0xD0:                /* xf551 hispeed */
+    case 0xD7:
+        return SIO_WriteSector(unit, sector, DataBuffer);
+    default:
+        return 'E';
+    }
 }
 
 /* Put a byte that comes out of POKEY. So get it here... */
 void SIO_PutByte(int byte)
 {
-	switch (TransferStatus) {
-	case SIO_CommandFrame:
-		if (CommandIndex < ExpectedBytes) {
-			CommandFrame[CommandIndex++] = byte;
-			if (CommandIndex >= ExpectedBytes) {
-				if (CommandFrame[0] >= 0x31 && CommandFrame[0] <= 0x38 && (SIO_drive_status[CommandFrame[0]-0x31] != SIO_OFF || BINLOAD_start_binloading)) {
-					TransferStatus = SIO_StatusRead;
-					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-				}
+    switch (TransferStatus) {
+    case SIO_CommandFrame:
+        if (CommandIndex < ExpectedBytes) {
+            CommandFrame[CommandIndex++] = byte;
+            if (CommandIndex >= ExpectedBytes) {
+                if (CommandFrame[0] >= 0x31 && CommandFrame[0] <= 0x38 && (SIO_drive_status[CommandFrame[0]-0x31] != SIO_OFF || BINLOAD_start_binloading)) {
+                    TransferStatus = SIO_StatusRead;
+                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+                }
 #ifdef USE_FUJINET
-				else if (CommandFrame[0] == 0x70) {
-					/* FujiNet device - send via NetSIO */
-					Log_print("FujiNet device command frame received");
-					TransferStatus = SIO_StatusRead;
-					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-				}
+                else if (CommandFrame[0] == 0x70) {
+                    /* FujiNet device - send via NetSIO */
+                    Log_print("FujiNet device command frame received");
+                    TransferStatus = SIO_StatusRead;
+                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+                }
 #endif
-				else
-					TransferStatus = SIO_NoFrame;
-			}
-		}
-		else {
-			Log_print("Invalid command frame!");
-			TransferStatus = SIO_NoFrame;
-		}
-		break;
-	case SIO_WriteFrame:		/* Expect data */
-		if (DataIndex < ExpectedBytes) {
-			DataBuffer[DataIndex++] = byte;
-			if (DataIndex >= ExpectedBytes) {
-				UBYTE sum = SIO_ChkSum(DataBuffer, ExpectedBytes - 1);
-				if (sum == DataBuffer[ExpectedBytes - 1]) {
-					UBYTE result = WriteSectorBack();
-					if (result != 0) {
-						DataBuffer[0] = 'A';
-						DataBuffer[1] = result;
-						DataIndex = 0;
-						ExpectedBytes = 2;
-						POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-						TransferStatus = SIO_FinalStatus;
-					}
-					else
-						TransferStatus = SIO_NoFrame;
-				}
-				else {
-					DataBuffer[0] = 'E';
-					DataIndex = 0;
-					ExpectedBytes = 1;
-					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-					TransferStatus = SIO_FinalStatus;
-				}
-			}
-		}
-		else {
-			Log_print("Invalid data frame!");
-		}
-		break;
-	}
-	CASSETTE_PutByte(byte);
-	/* POKEY_DELAYED_SEROUT_IRQ = SIO_SEROUT_INTERVAL; */ /* already set in pokey.c */
+                else
+                    TransferStatus = SIO_NoFrame;
+            }
+        }
+        else {
+            Log_print("Invalid command frame!");
+            TransferStatus = SIO_NoFrame;
+        }
+        break;
+    case SIO_WriteFrame:        /* Expect data */
+        if (DataIndex < ExpectedBytes) {
+            DataBuffer[DataIndex++] = byte;
+            if (DataIndex >= ExpectedBytes) {
+                UBYTE sum = SIO_ChkSum(DataBuffer, ExpectedBytes - 1);
+                if (sum == DataBuffer[ExpectedBytes - 1]) {
+                    UBYTE result = WriteSectorBack();
+                    if (result != 0) {
+                        DataBuffer[0] = 'A';
+                        DataBuffer[1] = result;
+                        DataIndex = 0;
+                        ExpectedBytes = 2;
+                        POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+                        TransferStatus = SIO_FinalStatus;
+                    }
+                    else
+                        TransferStatus = SIO_NoFrame;
+                }
+                else {
+                    DataBuffer[0] = 'E';
+                    DataIndex = 0;
+                    ExpectedBytes = 1;
+                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+                    TransferStatus = SIO_FinalStatus;
+                }
+            }
+        }
+        else {
+            Log_print("Invalid data frame!");
+        }
+        break;
+    }
+    CASSETTE_PutByte(byte);
+    /* POKEY_DELAYED_SEROUT_IRQ = SIO_SEROUT_INTERVAL; */ /* already set in pokey.c */
 }
 
 /* Get a byte from the floppy to the pokey. */
 int SIO_GetByte(void)
 {
-	int byte = 0;
+    int byte = 0;
 
-	switch (TransferStatus) {
-	case SIO_StatusRead:
-		byte = Command_Frame(DataBuffer);		/* Handle now the command */
-		break;
-	case SIO_FormatFrame:
-		TransferStatus = SIO_ReadFrame;
-		POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL << 3;
-		/* FALL THROUGH */
-	case SIO_ReadFrame:
-		if (DataIndex < ExpectedBytes) {
-			byte = DataBuffer[DataIndex++];
-			if (DataIndex >= ExpectedBytes) {
-				TransferStatus = SIO_NoFrame;
-			}
-			else {
-				/* set delay using the expected transfer speed */
-				POKEY_DELAYED_SERIN_IRQ = (DataIndex == 1) ? SIO_SERIN_INTERVAL
-					: ((SIO_SERIN_INTERVAL * POKEY_AUDF[POKEY_CHAN3] - 1) / 0x28 + 1);
-			}
-		}
-		else {
-			Log_print("Invalid read frame!");
-			TransferStatus = SIO_NoFrame;
-		}
-		break;
-	case SIO_FinalStatus:
-		if (DataIndex < ExpectedBytes) {
-			byte = DataBuffer[DataIndex++];
-			if (DataIndex >= ExpectedBytes) {
-				TransferStatus = SIO_NoFrame;
-			}
-			else {
-				if (DataIndex == 0)
-					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-				else
-					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
-			}
-		}
-		else {
-			Log_print("Invalid read frame!");
-			TransferStatus = SIO_NoFrame;
-		}
-		break;
-	default:
-		byte = CASSETTE_GetByte();
-		break;
-	}
-	return byte;
+    switch (TransferStatus) {
+    case SIO_StatusRead:
+        byte = Command_Frame(DataBuffer);    /* Handle now the command */
+        break;
+    case SIO_FormatFrame:
+        TransferStatus = SIO_ReadFrame;
+        POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL << 3;
+        /* FALL THROUGH */
+    case SIO_ReadFrame:
+        if (DataIndex < ExpectedBytes) {
+            byte = DataBuffer[DataIndex++];
+            if (DataIndex >= ExpectedBytes) {
+                TransferStatus = SIO_NoFrame;
+            }
+            else {
+                /* set delay using the expected transfer speed */
+                POKEY_DELAYED_SERIN_IRQ = (DataIndex == 1) ? SIO_SERIN_INTERVAL
+                    : ((SIO_SERIN_INTERVAL * POKEY_AUDF[POKEY_CHAN3] - 1) / 0x28 + 1);
+            }
+        }
+        else {
+            Log_print("Invalid read frame!");
+            TransferStatus = SIO_NoFrame;
+        }
+        break;
+    case SIO_FinalStatus:
+        if (DataIndex < ExpectedBytes) {
+            byte = DataBuffer[DataIndex++];
+            if (DataIndex >= ExpectedBytes) {
+                TransferStatus = SIO_NoFrame;
+            }
+            else {
+                if (DataIndex == 0)
+                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+                else
+                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
+            }
+        }
+        else {
+            Log_print("Invalid read frame!");
+            TransferStatus = SIO_NoFrame;
+        }
+        break;
+    default:
+        byte = CASSETTE_GetByte();
+        break;
+    }
+    return byte;
 }
 
 #if !defined(BASIC) && !defined(__PLUS)
 int SIO_RotateDisks(void)
 {
-	char tmp_filenames[8][FILENAME_MAX];
-	int i;
-	int bSuccess = TRUE;
+    char tmp_filenames[8][FILENAME_MAX];
+    int i;
+    int bSuccess = TRUE;
 
-	for (i = 0; i < 8; i++) {
-		strcpy(tmp_filenames[i], SIO_filename[i]);
-		SIO_Dismount(i + 1);
-	}
+    for (i = 0; i < 8; i++) {
+        strcpy(tmp_filenames[i], SIO_filename[i]);
+        SIO_Dismount(i + 1);
+    }
 
-	for (i = 1; i < 8; i++) {
-		if (strcmp(tmp_filenames[i], "None") && strcmp(tmp_filenames[i], "Off") && strcmp(tmp_filenames[i], "Empty") ) {
-			if (!SIO_Mount(i, tmp_filenames[i], FALSE)) /* Note that this is NOT i-1 because SIO_Mount is 1 indexed */
-				bSuccess = FALSE;
-		}
-	}
+    for (i = 1; i < 8; i++) {
+        if (strcmp(tmp_filenames[i], "None") && strcmp(tmp_filenames[i], "Off") && strcmp(tmp_filenames[i], "Empty") ) {
+            if (!SIO_Mount(i, tmp_filenames[i], FALSE)) /* Note that this is NOT i-1 because SIO_Mount is 1 indexed */
+                bSuccess = FALSE;
+        }
+    }
 
-	i = 7;
-	while (i > -1 && (!strcmp(tmp_filenames[i], "None") || !strcmp(tmp_filenames[i], "Off") || !strcmp(tmp_filenames[i], "Empty")) ) {
-		i--;
-	}
+    i = 7;
+    while (i > -1 && (!strcmp(tmp_filenames[i], "None") || !strcmp(tmp_filenames[i], "Off") || !strcmp(tmp_filenames[i], "Empty")) ) {
+        i--;
+    }
 
-	if (i > -1)	{
-		if (!SIO_Mount(i + 1, tmp_filenames[0], FALSE))
-			bSuccess = FALSE;
-	}
+    if (i > -1)    {
+        if (!SIO_Mount(i + 1, tmp_filenames[0], FALSE))
+            bSuccess = FALSE;
+    }
 
-	return bSuccess;
+    return bSuccess;
 }
 #endif /* !defined(BASIC) && !defined(__PLUS) */
 
@@ -1483,42 +1536,42 @@ int SIO_RotateDisks(void)
 
 void SIO_StateSave(void)
 {
-	int i;
+    int i;
 
-	for (i = 0; i < 8; i++) {
-		StateSav_SaveINT((int *) &SIO_drive_status[i], 1);
-		StateSav_SaveFNAME(SIO_filename[i]);
-	}
+    for (i = 0; i < 8; i++) {
+        StateSav_SaveINT((int *) &SIO_drive_status[i], 1);
+        StateSav_SaveFNAME(SIO_filename[i]);
+    }
 }
 
 void SIO_StateRead(void)
 {
-	int i;
+    int i;
 
-	for (i = 0; i < 8; i++) {
-		int saved_drive_status;
-		char filename[FILENAME_MAX];
+    for (i = 0; i < 8; i++) {
+        int saved_drive_status;
+        char filename[FILENAME_MAX];
 
-		StateSav_ReadINT(&saved_drive_status, 1);
-		SIO_drive_status[i] = (SIO_UnitStatus)saved_drive_status;
+        StateSav_ReadINT(&saved_drive_status, 1);
+        SIO_drive_status[i] = (SIO_UnitStatus)saved_drive_status;
 
-		StateSav_ReadFNAME(filename);
-		if (filename[0] == 0)
-			continue;
+        StateSav_ReadFNAME(filename);
+        if (filename[0] == 0)
+            continue;
 
-		/* If the disk drive wasn't empty or off when saved,
-		   mount the disk */
-		switch (saved_drive_status) {
-		case SIO_READ_ONLY:
-			SIO_Mount(i + 1, filename, TRUE);
-			break;
-		case SIO_READ_WRITE:
-			SIO_Mount(i + 1, filename, FALSE);
-			break;
-		default:
-			break;
-		}
-	}
+        /* If the disk drive wasn't empty or off when saved,
+           mount the disk */
+        switch (saved_drive_status) {
+        case SIO_READ_ONLY:
+            SIO_Mount(i + 1, filename, TRUE);
+            break;
+        case SIO_READ_WRITE:
+            SIO_Mount(i + 1, filename, FALSE);
+            break;
+        default:
+            break;
+        }
+    }
 }
 
 #endif /* BASIC */

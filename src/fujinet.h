@@ -4,12 +4,18 @@
 #include "config.h" /* For HAVE_SOCKET etc. */
 #include <stdint.h> /* For uint8_t type */
 
+/* Configuration */
+#define FUJINET_BUFFER_SIZE 1024 /* Max size for internal buffers */
+
 /* Define USE_FUJINET temporarily for development, will be controlled by build system later */
 #ifndef USE_FUJINET
 #define USE_FUJINET 1
 #endif
 
 #ifdef USE_FUJINET
+
+/* Global variable indicating if FujiNet is initialized and connected */
+extern int fujinet_enabled;
 
 /* Initializes the FujiNet device emulation.
    host_port is a string like "host:port", or NULL for default.
@@ -19,11 +25,10 @@ int FujiNet_Initialise(const char *host_port);
 /* Tears down the FujiNet device emulation. */
 void FujiNet_Shutdown(void);
 
-/* Processes an SIO command frame.
-   command_frame: Pointer to the 5-byte SIO command frame.
-   response_frame: Pointer to a buffer where the 4-byte SIO response frame will be stored.
-   Returns 1 if the command was processed successfully, 0 otherwise (e.g., timeout, error). */
-int FujiNet_ProcessCommand(const unsigned char *command_frame, unsigned char *response_frame);
+/* Processes a 5-byte SIO command frame and returns the immediate SIO response byte (A, N, C, E). */
+UBYTE FujiNet_ProcessCommand(
+    const UBYTE *command_frame /* Pointer to the 5-byte SIO command frame */
+);
 
 /* Sends a single byte to the FujiNet device.
    Returns 1 on success, 0 on failure. */
