@@ -1,9 +1,10 @@
 #ifndef FUJINET_H_
 #define FUJINET_H_
 
-#include "config.h" // For HAVE_SOCKET etc.
+#include "config.h" /* For HAVE_SOCKET etc. */
+#include <stdint.h> /* For uint8_t type */
 
-// Define USE_FUJINET temporarily for development, will be controlled by build system later
+/* Define USE_FUJINET temporarily for development, will be controlled by build system later */
 #ifndef USE_FUJINET
 #define USE_FUJINET 1
 #endif
@@ -24,13 +25,18 @@ void FujiNet_Shutdown(void);
    Returns 1 if the command was processed successfully, 0 otherwise (e.g., timeout, error). */
 int FujiNet_ProcessCommand(const unsigned char *command_frame, unsigned char *response_frame);
 
+/* Sends a single byte to the FujiNet device.
+   Returns 1 on success, 0 on failure. */
+int FujiNet_PutByte(uint8_t byte);
+
+/* Receives a single byte from the FujiNet device.
+   The received byte is stored in the memory pointed to by 'byte'.
+   Returns 1 on success, 0 on failure. */
+int FujiNet_GetByte(uint8_t *byte);
+
 /* Updates the motor status sent to FujiNet-PC.
    on: 1 for motor on, 0 for motor off. */
-void FujiNet_SetMotor(int on);
-
-/* Checks if FujiNet support is currently enabled and initialized. */
-int FujiNet_IsEnabled(void);
-
+void FujiNet_SetMotorState(int on);
 
 #endif /* USE_FUJINET */
 

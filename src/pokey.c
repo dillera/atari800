@@ -65,6 +65,7 @@ void pokey_update(void);
 
 #ifdef USE_FUJINET
 #include "fujinet.h"
+extern int fujinet_enabled; /* Defined in fujinet.c */
 #endif
 
 UBYTE POKEY_KBCODE;
@@ -209,12 +210,12 @@ void POKEY_PutByte(UWORD addr, UBYTE byte)
 		break;
 	case POKEY_OFFSET_AUDCTL:
 #ifdef USE_FUJINET
-		// Check motor state change *before* updating POKEY_AUDCTL[0]
-		if (FujiNet_IsEnabled()) {
+		/* Check motor state change *before* updating POKEY_AUDCTL[0] */
+		if (fujinet_enabled) {
 			UBYTE old_audctl = POKEY_AUDCTL[0];
-			// Check Bit 5 (0x20) for change (Motor On signal)
+			/* Check Bit 5 (0x20) for change (Motor On signal) */
 			if ((old_audctl & 0x20) != (byte & 0x20)) {
-				FujiNet_SetMotor((byte & 0x20) ? 1 : 0);
+				FujiNet_SetMotorState((byte & 0x20) ? 1 : 0);
 			}
 		}
 #endif

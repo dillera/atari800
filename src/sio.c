@@ -50,6 +50,7 @@
 #endif
 #ifdef USE_FUJINET
 #include "fujinet.h"
+extern int fujinet_enabled; /* Defined in fujinet.c */
 #endif
 
 /* SIO Status Codes (internal) */
@@ -83,20 +84,22 @@
 #define BOOT_SECTORS_LOGICAL	0
 #define BOOT_SECTORS_PHYSICAL	1
 #define BOOT_SECTORS_SIO2PC		2
-static int boot_sectors_type[SIO_MAX_DRIVES];
+static int boot_sectors_type[8]; /* Current boot sectors type (1-3 for DOS) for each supported drive. */
+/* ATR Header info from sethdrinfo */
+SBYTE command_frame_status = 0;
 
-static int image_type[SIO_MAX_DRIVES];
+static int image_type[8];
 #define IMAGE_TYPE_XFD  0
 #define IMAGE_TYPE_ATR  1
 #define IMAGE_TYPE_PRO  2
 #define IMAGE_TYPE_VAPI 3
-static FILE *disk[SIO_MAX_DRIVES] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
-static int sectorcount[SIO_MAX_DRIVES];
-static int sectorsize[SIO_MAX_DRIVES];
+static FILE *disk[8] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+static int sectorcount[8];
+static int sectorsize[8];
 /* these two are used by the 1450XLD parallel disk device */
-int SIO_format_sectorcount[SIO_MAX_DRIVES];
-int SIO_format_sectorsize[SIO_MAX_DRIVES];
-static int io_success[SIO_MAX_DRIVES];
+int SIO_format_sectorcount[8];
+int SIO_format_sectorsize[8];
+static int io_success[8];
 /* stores dup sector counter for PRO images */
 typedef struct tagpro_additional_info_t {
 	int max_sector;
@@ -170,12 +173,12 @@ typedef struct tagvapi_sector_header_t {
 #define VAPI_16(x) (x[0] + (x[1] << 8))
 
 /* Additional Info for all copy protected disk types */
-static void *additional_info[SIO_MAX_DRIVES];
+static void *additional_info[8];
 
-SIO_UnitStatus SIO_drive_status[SIO_MAX_DRIVES];
-char SIO_filename[SIO_MAX_DRIVES][FILENAME_MAX];
+SIO_UnitStatus SIO_drive_status[8];
+char SIO_filename[8][FILENAME_MAX];
 
-Util_tmpbufdef(static, sio_tmpbuf[SIO_MAX_DRIVES])
+Util_tmpbufdef(static, sio_tmpbuf[8])
 
 static int SIO_FrameCounter = 0;
 static int SIO_last_result = SIO_OK; /* SIO_OK, SIO_ERROR, SIO_COMPLETE, SIO_CHECKSUM_ERROR */
@@ -205,7 +208,7 @@ int ignore_header_writeprotect = FALSE;
 int SIO_Initialise(int *argc, char *argv[])
 {
 	int i;
-	for (i = 0; i < SIO_MAX_DRIVES; i++) {
+	for (i = 0; i < 8; i++) {
 		strcpy(SIO_filename[i], "Off");
 		SIO_drive_status[i] = SIO_OFF;
 		SIO_format_sectorsize[i] = 128;
@@ -238,7 +241,7 @@ int SIO_Initialise(int *argc, char *argv[])
 void SIO_Exit(void)
 {
 	int i;
-	for (i = 1; i <= SIO_MAX_DRIVES; i++)
+	for (i = 1; i <= 8; i++)
 		SIO_Dismount(i);
 
 #ifdef USE_FUJINET
@@ -939,7 +942,11 @@ static int Command_Frame(UBYTE *data_buffer)
 	(void)timeout; /* Suppress unused variable warning */
 
 	/* Check device ID */
+#ifdef USE_FUJINET
+	if (data_buffer[0] != 0x31 && data_buffer[0] != 0x70) { /* Allow both D1: and FujiNet devices */
+#else
 	if (data_buffer[0] != 0x31) { /* Only device D1: supported for now */
+#endif
 		SIO_last_result = SIO_ERROR;
 		return SIO_last_result;
 	}
@@ -966,7 +973,7 @@ static int Command_Frame(UBYTE *data_buffer)
 
 #ifdef USE_FUJINET
 	/* Check if FujiNet is enabled and should handle this command */
-	if (FujiNet_IsEnabled()) {
+	if (fujinet_enabled) {
 		/* Try to process the command with FujiNet */
 		if (FujiNet_ProcessCommand(data_buffer, response_frame)) {
 			/* Command was processed by FujiNet */
@@ -1092,7 +1099,7 @@ void SIO_Handler(void)
 	/* Disk 1 -> unit = 0 */
 	unit -= 0x31;
 
-	if (MEMORY_dGetByte(0x300) != 0x60 && unit < SIO_MAX_DRIVES && (SIO_drive_status[unit] != SIO_OFF || BINLOAD_start_binloading)) {	/* UBYTE range ! */
+	if (MEMORY_dGetByte(0x300) != 0x60 && unit < 8 && (SIO_drive_status[unit] != SIO_OFF || BINLOAD_start_binloading)) {	/* UBYTE range ! */
 
 # ifdef DEBUG
 Log_print("SIO disk command is %02x %02x %02x %02x %02x   %02x %02x %02x %02x %02x %02x",
@@ -1304,7 +1311,7 @@ static UBYTE WriteSectorBack(void)
 
 	sector = CommandFrame[2] + (CommandFrame[3] << 8);
 	unit = CommandFrame[0] - '1';
-	if (unit >= SIO_MAX_DRIVES)		/* UBYTE range ! */
+	if (unit >= 8)		/* UBYTE range ! */
 		return 0;
 	switch (CommandFrame[1]) {
 	case 0x4f:				/* Write Status Block */
@@ -1331,6 +1338,14 @@ void SIO_PutByte(int byte)
 					TransferStatus = SIO_StatusRead;
 					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
 				}
+#ifdef USE_FUJINET
+				else if (CommandFrame[0] == 0x70) {
+					/* FujiNet device - send via NetSIO */
+					Log_print("FujiNet device command frame received");
+					TransferStatus = SIO_StatusRead;
+					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+				}
+#endif
 				else
 					TransferStatus = SIO_NoFrame;
 			}
@@ -1434,23 +1449,23 @@ int SIO_GetByte(void)
 #if !defined(BASIC) && !defined(__PLUS)
 int SIO_RotateDisks(void)
 {
-	char tmp_filenames[SIO_MAX_DRIVES][FILENAME_MAX];
+	char tmp_filenames[8][FILENAME_MAX];
 	int i;
 	int bSuccess = TRUE;
 
-	for (i = 0; i < SIO_MAX_DRIVES; i++) {
+	for (i = 0; i < 8; i++) {
 		strcpy(tmp_filenames[i], SIO_filename[i]);
 		SIO_Dismount(i + 1);
 	}
 
-	for (i = 1; i < SIO_MAX_DRIVES; i++) {
+	for (i = 1; i < 8; i++) {
 		if (strcmp(tmp_filenames[i], "None") && strcmp(tmp_filenames[i], "Off") && strcmp(tmp_filenames[i], "Empty") ) {
 			if (!SIO_Mount(i, tmp_filenames[i], FALSE)) /* Note that this is NOT i-1 because SIO_Mount is 1 indexed */
 				bSuccess = FALSE;
 		}
 	}
 
-	i = SIO_MAX_DRIVES - 1;
+	i = 7;
 	while (i > -1 && (!strcmp(tmp_filenames[i], "None") || !strcmp(tmp_filenames[i], "Off") || !strcmp(tmp_filenames[i], "Empty")) ) {
 		i--;
 	}
