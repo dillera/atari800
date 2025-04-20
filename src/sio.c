@@ -937,7 +937,7 @@ static int Command_Frame(UBYTE *data_buffer)
 {
 #ifdef USE_FUJINET
     /* Check device ID (Allow disk drives D1-D8: 0x31-0x38 and FujiNet device 0x70) */
-    if ((data_buffer[0] < 0x31 || data_buffer[0] > 0x38) && data_buffer[0] != 0x70) {
+    if ((data_buffer[0] < 0x31 || data_buffer[0] > 0x38) && data_buffer[0] != 0x70) { /* Allow both D1: and FujiNet devices */
         Log_print("SIO: FujiNet Command_Frame received for unsupported Device ID: 0x%02X", data_buffer[0]);
         SIO_PutByte(SIO_NAK); /* Send NAK for wrong device */
         TransferStatus = SIO_NoFrame;
@@ -958,23 +958,32 @@ static int Command_Frame(UBYTE *data_buffer)
     );
     /* --- End FujiNet Call --- */
 
-    /* Send the immediate response byte from FujiNet */
-    SIO_PutByte(fujinet_response_byte);
+    /* Set CPU status registers to return the status to the OS */
+    CPU_regA = fujinet_response_byte;
+    if (fujinet_response_byte != SIO_NAK) { /* ACK ('A') or ERROR ('E') */
+        CPU_regY = 1; /* SUCCESS (from SIO protocol perspective, even if Error frame) */
+        CPU_ClrN;
+        CPU_SetC;
+    } else { /* NAK ('N') */
+        CPU_regY = 0; /* FAILURE */
+        CPU_SetN;
+        CPU_ClrC;
+    }
 
-    /* If the command was NOT acknowledged immediately (e.g., NAK, Error),
-     * then reset the SIO state machine. If it WAS acknowledged (ACK),
-     * leave the TransferStatus alone so the SIO state machine proceeds
-     * to the data transfer phase (calling GetByte/PutByte). */
-    if (fujinet_response_byte != SIO_ACK) {
-         Log_print("SIO_Handler: FujiNet command failed immediately (0x%02X), resetting SIO state.", fujinet_response_byte);
-         TransferStatus = SIO_NoFrame;
-         CommandIndex = 0; /* Reset index for next command */
-    } else {
-        Log_print("SIO_Handler: FujiNet command ACKed (0x%02X), proceeding to data phase.", fujinet_response_byte);
-        /* Set TransferStatus to indicate data transfer from device to OS is expected */
+    /* If the command was acknowledged (device will send data),
+     * set state for data transfer. Otherwise, reset SIO state. */
+    if (fujinet_response_byte == SIO_ACK) {
+        Log_print("SIO_Handler: FujiNet command ACKed (returned SIO_ACK 0x%02X), proceeding to data phase.", fujinet_response_byte);
+        /* Set TransferStatus to indicate data transfer FROM device TO OS is expected */
         TransferStatus = SIO_DataSend;
         CommandIndex = 0; /* Reset CommandIndex for data phase */
+        ExpectedBytes = FujiNet_SIO_GetResponseBufferSize(); /* Set expected bytes for SIO_GetByte */
         POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; /* Schedule the IRQ to tell the OS the first byte is ready */
+    } else {
+        Log_print("SIO_Handler: FujiNet command NOT ACKed (returned 0x%02X), resetting SIO state.", fujinet_response_byte);
+        TransferStatus = SIO_NoFrame;
+        CommandIndex = 0; /* Reset index for next command */
+        ExpectedBytes = 0; // Reset ExpectedBytes
     }
 #else /* Original SIO Logic */
 #endif /* USE_FUJINET */
@@ -1070,10 +1079,20 @@ static int Command_Frame(UBYTE *data_buffer)
  /* Enable/disable the command frame */
 void SIO_SwitchCommandFrame(int onoff)
 {
-	if (onoff)
+	if (onoff) {
 		TransferStatus = SIO_CommandFrame;
-	else
+		CommandIndex = 0;      /* Reset for new command */
+		ExpectedBytes = 5;     /* Standard SIO command frame size */
+#ifdef USE_FUJINET
+		FUJINET_DEBUG_LOG("SIO_SwitchCommandFrame: Enabled command frame, set ExpectedBytes=5");
+#endif
+	}
+	else {
 		TransferStatus = SIO_NoFrame;
+#ifdef USE_FUJINET
+		FUJINET_DEBUG_LOG("SIO_SwitchCommandFrame: Disabled command frame");
+#endif
+	}
 }
 
 # ifndef NO_SECTOR_DELAY
@@ -1101,6 +1120,11 @@ void SIO_Handler(void)
 
 	Log_print("SIO_Handler: Dev=0x%02X Unit=0x%02X Cmd=0x%02X Aux1=0x%02X Aux2=0x%02X Buf=0x%04X Len=%d",
 				  sio_devic, sio_unit, cmd, sio_aux1, sio_aux2, data, length);
+
+#ifdef USE_FUJINET
+	FUJINET_DEBUG_LOG("SIO_Handler: Pre-check state: TransferStatus=%d, sio_devic=0x%02X, fujinet_enabled=%d",
+					  TransferStatus, sio_devic, fujinet_enabled);
+#endif
 
 #ifdef USE_FUJINET
     /* Check for FujiNet device ID (0x70) */
@@ -1146,54 +1170,66 @@ void SIO_Handler(void)
             sio_response = SIO_ERROR_FRAME;
         }
 
-        /* Send the appropriate SIO protocol response byte */
-        SIO_PutByte(sio_response);
+        /* Set CPU status registers to return the status to the OS */
+        CPU_regA = sio_response;
+        if (sio_response != SIO_NAK) { /* ACK ('A') or ERROR ('E') */
+            CPU_regY = 1; /* SUCCESS (from SIO protocol perspective, even if Error frame) */
+            CPU_ClrN;
+            CPU_SetC;
+        } else { /* NAK ('N') */
+            CPU_regY = 0; /* FAILURE */
+            CPU_SetN;
+            CPU_ClrC;
+        }
 
-        /* If the command was acknowledged (device will send data), 
+        /* If the command was acknowledged (device will send data),
          * set state for data transfer. Otherwise, reset SIO state. */
-        if (sio_response == SIO_ACK) { 
-            Log_print("SIO_Handler: FujiNet command ACKed (sent SIO_ACK 0x%02X), proceeding to data phase.", sio_response);
+        if (sio_response == SIO_ACK) {
+            Log_print("SIO_Handler: FujiNet command ACKed (returned SIO_ACK 0x%02X), proceeding to data phase.", sio_response);
             /* Set TransferStatus to indicate data transfer FROM device TO OS is expected */
-            TransferStatus = SIO_DataSend; 
+            TransferStatus = SIO_DataSend;
             CommandIndex = 0; /* Reset CommandIndex for data phase */
+            ExpectedBytes = FujiNet_SIO_GetResponseBufferSize(); /* Set expected bytes for SIO_GetByte */
             POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; /* Schedule the IRQ to tell the OS the first byte is ready */
         } else {
-             Log_print("SIO_Handler: FujiNet command NOT ACKed (sent 0x%02X), resetting SIO state.", sio_response);
-             TransferStatus = SIO_NoFrame;
-             CommandIndex = 0; /* Reset index for next command */
+            Log_print("SIO_Handler: FujiNet command NOT ACKed (returned 0x%02X), resetting SIO state.", sio_response);
+            TransferStatus = SIO_NoFrame;
+            CommandIndex = 0; /* Reset index for next command */
+            ExpectedBytes = 0; // Reset ExpectedBytes
         }
         return; /* FujiNet handled the command, prevent fallthrough */
     } else {
+		FUJINET_DEBUG_LOG("SIO_Handler: Condition false, falling through to original SIO handling.");
 #endif /* USE_FUJINET */
-        /* Original SIO Handling starts here */
-        UBYTE unit;
-        int realsize;
-        UBYTE result = 'N';
-        unit = sio_devic + sio_unit + 0xff;
+		/* Original SIO Handling starts here */
+		UBYTE unit;
+		int realsize;
+		UBYTE result = 'N';
+		unit = sio_devic + sio_unit + 0xff;
 
-        if ((unsigned int)sio_devic + (unsigned int)sio_unit > 0xff) {
-            /* carry */
-            unit++;
-        }
-        /* A real atari just adds the bytes and 0xff. The result could wrap.*/
-        /* XL OS: E99D: LDA $0300 ADC $0301 ADC #$FF STA 023A */
+		if ((unsigned int)sio_devic + (unsigned int)sio_unit > 0xff) {
+			/* carry */
+			unit++;
+		}
+		/* A real atari just adds the bytes and 0xff. The result could wrap.*/
+		/* XL OS: E99D: LDA $0300 ADC $0301 ADC #$FF STA 023A */
 
-        /* The OS SIO routine copies decide ID do CDEVIC, command ID to CCOMND etc.
-           This operation is not needed with the SIO patch enabled, but we perform
-           it anyway, since some programs rely on that. (E.g. the E.T Phone Home!
-           cartridge would crash with SIO patch enabled.)
-           Note: While on a real XL OS the copying is done only for SIO devices
-           (not for PBI ones), here we copy the values for all types of devices -
-           it's probably harmless. */
-        MEMORY_dPutByte(0x023a, unit); /* sta CDEVIC */
-        MEMORY_dPutByte(0x023b, cmd); /* sta CCOMND */
-        MEMORY_dPutByte(0x023c, (sio_aux2 << 8) + sio_aux1); /* sta CAUX1; sta CAUX2 */
+		/* The OS SIO routine copies decide ID do CDEVIC, command ID to CCOMND etc.
+		   This operation is not needed with the SIO patch enabled, but we perform
+		   it anyway, since some programs rely on that. (E.g. the E.T Phone Home!
+		   cartridge would crash with SIO patch enabled.)
+		   Note: While on a real XL OS the copying is done only for SIO devices
+		   (not for PBI ones), here we copy the values for all types of devices -
+		   it's probably harmless. */
+		MEMORY_dPutByte(0x023a, unit); /* sta CDEVIC */
+		MEMORY_dPutByte(0x023b, cmd); /* sta CCOMND */
+		MEMORY_dPutByte(0x023c, (sio_aux2 << 8) + sio_aux1); /* sta CAUX1; sta CAUX2 */
 
-        /* Disk 1 is ASCII '1' = 0x31 etc */
-        /* Disk 1 -> unit = 0 */
-        unit -= 0x31;
+		/* Disk 1 is ASCII '1' = 0x31 etc */
+		/* Disk 1 -> unit = 0 */
+		unit -= 0x31;
 
-        if (MEMORY_dGetByte(0x300) != 0x60 && unit < 8 && (SIO_drive_status[unit] != SIO_OFF || BINLOAD_start_binloading)) {    /* UBYTE range ! */
+		if (MEMORY_dGetByte(0x300) != 0x60 && unit < 8 && (SIO_drive_status[unit] != SIO_OFF || BINLOAD_start_binloading)) {    /* UBYTE range ! */
 
 # ifdef DEBUG
     Log_print("SIO disk command is %02x %02x %02x %02x %02x   %02x %02x %02x %02x %02x %02x",
@@ -1202,7 +1238,7 @@ void SIO_Handler(void)
             MEMORY_dGetByte(0x30c), MEMORY_dGetByte(0x30d));
 
 # endif
-        switch (cmd) {
+		switch (cmd) {
             case 0x4e:                /* Read Status Block */
                 if (12 == length) {
                     result = SIO_ReadStatusBlock(unit, DataBuffer);
@@ -1424,207 +1460,265 @@ static UBYTE WriteSectorBack(void)
 /* Put a byte that comes out of POKEY. So get it here... */
 void SIO_PutByte(int byte)
 {
-    switch (TransferStatus) {
-    case SIO_CommandFrame:
-        if (CommandIndex < ExpectedBytes) {
-            CommandFrame[CommandIndex++] = byte;
-            if (CommandIndex >= ExpectedBytes) {
-                if (CommandFrame[0] >= 0x31 && CommandFrame[0] <= 0x38 && (SIO_drive_status[CommandFrame[0]-0x31] != SIO_OFF || BINLOAD_start_binloading)) {
-                    TransferStatus = SIO_StatusRead;
-                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-                }
 #ifdef USE_FUJINET
-                else if (CommandFrame[0] == 0x70) {
-                    /* FujiNet device - send via NetSIO */
-                    TransferStatus = SIO_StatusRead;
-                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-                }
+	// Log entry with current state
+	FUJINET_DEBUG_LOG("SIO_PutByte: Entered. Byte=0x%02X, TransferStatus=%d, CommandIndex=%d, ExpectedBytes=%d",
+					  byte, TransferStatus, CommandIndex, ExpectedBytes);
 #endif
-                else
-                    TransferStatus = SIO_NoFrame;
-            }
-        }
-        else {
-            Log_print("Invalid command frame!");
-            TransferStatus = SIO_NoFrame;
-        }
-        break;
-    case SIO_WriteFrame:        /* Expect data */
-        if (DataIndex < ExpectedBytes) {
-            DataBuffer[DataIndex++] = byte;
-            if (DataIndex >= ExpectedBytes) {
-                UBYTE sum = SIO_ChkSum(DataBuffer, ExpectedBytes - 1);
-                if (sum == DataBuffer[ExpectedBytes - 1]) {
-                    UBYTE result = WriteSectorBack();
-                    if (result != 0) {
-                        DataBuffer[0] = 'A';
-                        DataBuffer[1] = result;
-                        DataIndex = 0;
-                        ExpectedBytes = 2;
-                        POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-                        TransferStatus = SIO_FinalStatus;
-                    }
-                    else
-                        TransferStatus = SIO_NoFrame;
-                }
-                else {
-                    DataBuffer[0] = 'E';
-                    DataIndex = 0;
-                    ExpectedBytes = 1;
-                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-                    TransferStatus = SIO_FinalStatus;
-                }
-            }
-        }
-        else {
-            Log_print("Invalid data frame!");
-        }
-        break;
-    }
-    CASSETTE_PutByte(byte);
-    /* POKEY_DELAYED_SEROUT_IRQ = SIO_SEROUT_INTERVAL; */ /* already set in pokey.c */
+
+	switch (TransferStatus) {
+	case SIO_CommandFrame:
+		if (CommandIndex < ExpectedBytes) {
+			// Log byte received
+#ifdef USE_FUJINET
+			FUJINET_DEBUG_LOG("SIO_PutByte: Received Command Frame byte %d: 0x%02X", CommandIndex + 1, byte);
+#endif
+			CommandFrame[CommandIndex++] = byte;
+			if (CommandIndex >= ExpectedBytes) {
+#ifdef USE_FUJINET
+				FUJINET_DEBUG_LOG("SIO_PutByte: Full command frame received: %02X %02X %02X %02X %02X",
+								  CommandFrame[0], CommandFrame[1], CommandFrame[2], CommandFrame[3], CommandFrame[4]);
+#endif
+				// Original logic for checking device and transitioning state
+				if ((CommandFrame[0] >= 0x31 && CommandFrame[0] <= 0x38 && (SIO_drive_status[CommandFrame[0]-0x31] != SIO_OFF || BINLOAD_start_binloading))) {
+#ifdef USE_FUJINET
+					FUJINET_DEBUG_LOG("SIO_PutByte: Standard SIO device detected. Setting TransferStatus = SIO_StatusRead.");
+#endif
+					TransferStatus = SIO_StatusRead;
+					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+				}
+#ifdef USE_FUJINET
+				// Also allow disk drives (0x31-0x38) to be valid when FujiNet is enabled
+				else if (fujinet_enabled && CommandFrame[0] >= 0x31 && CommandFrame[0] <= 0x38) {
+					FUJINET_DEBUG_LOG("SIO_PutByte: Disk device 0x%02X via FujiNet detected. Setting TransferStatus = SIO_StatusRead.", CommandFrame[0]);
+					TransferStatus = SIO_StatusRead;
+					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+				}
+				// Handle dedicated FujiNet device 0x70
+				else if (CommandFrame[0] == 0x70) { 
+					FUJINET_DEBUG_LOG("SIO_PutByte: FujiNet device 0x70 detected. Setting TransferStatus = SIO_StatusRead.");
+					TransferStatus = SIO_StatusRead;
+					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+				}
+#endif
+				else {
+#ifdef USE_FUJINET
+					FUJINET_DEBUG_LOG("SIO_PutByte: Invalid device ID 0x%02X. Setting TransferStatus = SIO_NoFrame.", CommandFrame[0]);
+#endif
+					TransferStatus = SIO_NoFrame;
+				}
+			}
+		}
+		else {
+			// Log the error condition
+#ifdef USE_FUJINET
+			FUJINET_DEBUG_LOG("SIO_PutByte: ERROR - Received byte 0x%02X when CommandIndex(%d) >= ExpectedBytes(%d) in SIO_CommandFrame state!",
+							  byte, CommandIndex, ExpectedBytes);
+#endif
+			Log_print("Invalid command frame!"); // Original log
+			TransferStatus = SIO_NoFrame;
+		}
+		break;
+	case SIO_WriteFrame:		/* Expect data */
+#ifdef USE_FUJINET
+		// Log byte received during write
+		FUJINET_DEBUG_LOG("SIO_PutByte: Received Write Frame byte %d: 0x%02X", DataIndex + 1, byte);
+#endif
+		if (DataIndex < ExpectedBytes) {
+			DataBuffer[DataIndex++] = byte;
+			if (DataIndex >= ExpectedBytes) {
+				UBYTE sum = SIO_ChkSum(DataBuffer, ExpectedBytes - 1);
+				if (sum == DataBuffer[ExpectedBytes - 1]) {
+					UBYTE result = WriteSectorBack();
+					if (result != 0) {
+						DataBuffer[0] = 'A';
+						DataBuffer[1] = result;
+						DataIndex = 0;
+						ExpectedBytes = 2;
+						POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+						TransferStatus = SIO_FinalStatus;
+					}
+					else
+						TransferStatus = SIO_NoFrame;
+				}
+				else {
+					DataBuffer[0] = 'E';
+					DataIndex = 0;
+					ExpectedBytes = 1;
+					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+					TransferStatus = SIO_FinalStatus;
+				}
+			}
+		}
+		else {
+			Log_print("Invalid data frame!");
+		}
+		break;
+#ifdef USE_FUJINET
+	// Add cases for other FujiNet states to log unexpected bytes
+	case SIO_DataSend:
+		FUJINET_DEBUG_LOG("SIO_PutByte: WARNING - Received byte 0x%02X during SIO_DataSend state. Ignoring.", byte);
+		break;
+	case SIO_FujiNet_Completion:
+		 FUJINET_DEBUG_LOG("SIO_PutByte: WARNING - Received byte 0x%02X during SIO_FujiNet_Completion state. Ignoring.", byte);
+		 break;
+#endif
+	// Log bytes received in unexpected states
+	case SIO_NoFrame:
+#ifdef USE_FUJINET
+		 FUJINET_DEBUG_LOG("SIO_PutByte: Received byte 0x%02X during SIO_NoFrame state. Passing to Cassette.", byte);
+#endif
+		 break;
+	default:
+#ifdef USE_FUJINET
+		 FUJINET_DEBUG_LOG("SIO_PutByte: WARNING - Received byte 0x%02X during unhandled TransferStatus=%d. Passing to Cassette.", byte, TransferStatus);
+#endif
+		 break;
+	}
+	CASSETTE_PutByte(byte);
+	/* POKEY_DELAYED_SEROUT_IRQ = SIO_SEROUT_INTERVAL; */ /* already set in pokey.c */
 }
 
-/* Get a byte from the floppy to the pokey. */
+/* Get a byte that comes out of POKEY. So get it here... */
 int SIO_GetByte(void)
 {
-    int byte = 0;
+	int byte = 0;
 
 #ifdef USE_FUJINET
-    /* Check if FujiNet is enabled and expecting data */
-    if (fujinet_enabled && TransferStatus == SIO_DataSend) {
-        uint8_t fuji_byte;
-        int fuji_result = FujiNet_SIO_GetByte(&fuji_byte);
+	/* Check if FujiNet is enabled and expecting data */
+	if (fujinet_enabled && TransferStatus == SIO_DataSend) {
+		uint8_t fuji_byte;
+		int fuji_result = FujiNet_SIO_GetByte(&fuji_byte);
 
-        if (fuji_result == 1) { /* Data byte received */
-            int current_pos = FujiNet_SIO_GetResponseBufferPos(); // Note: This is pos *after* reading
-            int buffer_size = FujiNet_SIO_GetResponseBufferSize();
+		if (fuji_result == 1) { /* Data byte received */
+			int current_pos = FujiNet_SIO_GetResponseBufferPos(); // Note: This is pos *after* reading
+			int buffer_size = FujiNet_SIO_GetResponseBufferSize();
 
-            if (current_pos == buffer_size) { 
-                /* This was the LAST byte */
-                FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet returned FINAL data byte 0x%02X (pos %d/%d)", 
-                                 fuji_byte, current_pos, buffer_size);
-                byte = fuji_byte;
-                TransferStatus = SIO_FujiNet_Completion; /* Go to completion state */
-                /* Schedule IRQ for OS to request the final 'C' byte */
-                POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; 
-            } else {
-                /* More bytes expected */
-                FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet returned data byte 0x%02X (pos %d/%d)", 
-                                 fuji_byte, current_pos, buffer_size);
-                byte = fuji_byte;
-                /* Schedule IRQ for OS to request the next byte */
-                POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; 
-            }
-        } else if (fuji_result == 0) { 
-            /* Should not happen if logic is correct, means SIO_GetByte called after last byte */
-            FUJINET_DEBUG_LOG("SIO_GetByte: ERROR - FujiNet buffer empty when byte requested!");
-            TransferStatus = SIO_NoFrame; 
-            CommandIndex = 0;
-            byte = SIO_ERROR_FRAME; 
-        } else { /* Error from FujiNet_SIO_GetByte (e.g., -1) */
-            FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet_SIO_GetByte returned error %d", fuji_result);
-            TransferStatus = SIO_NoFrame; 
-            CommandIndex = 0;
-            byte = SIO_ERROR_FRAME; 
-        }
-    }
+			if (current_pos == buffer_size) { 
+				/* This was the LAST byte */
+				FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet returned FINAL data byte 0x%02X (pos %d/%d)", 
+								 fuji_byte, current_pos, buffer_size);
+				byte = fuji_byte;
+				TransferStatus = SIO_FujiNet_Completion; /* Go to completion state */
+				/* Schedule IRQ for OS to request the final 'C' byte */
+				POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; 
+			} else {
+				/* More bytes expected */
+				FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet returned data byte 0x%02X (pos %d/%d)", 
+								 fuji_byte, current_pos, buffer_size);
+				byte = fuji_byte;
+				/* Schedule IRQ for OS to request the next byte */
+				POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; 
+			}
+		} else if (fuji_result == 0) { 
+			/* Should not happen if logic is correct, means SIO_GetByte called after last byte */
+			FUJINET_DEBUG_LOG("SIO_GetByte: ERROR - FujiNet buffer empty when byte requested!");
+			TransferStatus = SIO_NoFrame; 
+			CommandIndex = 0;
+			byte = SIO_ERROR_FRAME; 
+		} else { /* Error from FujiNet_SIO_GetByte (e.g., -1) */
+			FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet_SIO_GetByte returned error %d", fuji_result);
+			TransferStatus = SIO_NoFrame; 
+			CommandIndex = 0;
+			byte = SIO_ERROR_FRAME; 
+		}
+	}
 #endif /* USE_FUJINET */
 
-    switch (TransferStatus) {
-    case SIO_StatusRead:
-        byte = Command_Frame(DataBuffer);    /* Handle now the command */
-        break;
-    case SIO_FormatFrame:
-        TransferStatus = SIO_ReadFrame;
-        POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL << 3;
-        /* FALL THROUGH */
-    case SIO_ReadFrame:
-        if (DataIndex < ExpectedBytes) {
-            byte = DataBuffer[DataIndex++];
-            if (DataIndex >= ExpectedBytes) {
-                TransferStatus = SIO_NoFrame;
-            }
-            else {
-                /* set delay using the expected transfer speed */
-                POKEY_DELAYED_SERIN_IRQ = (DataIndex == 1) ? SIO_SERIN_INTERVAL
-                    : ((SIO_SERIN_INTERVAL * POKEY_AUDF[POKEY_CHAN3] - 1) / 0x28 + 1);
-            }
-        }
-        else {
-            Log_print("Invalid read frame!");
-            TransferStatus = SIO_NoFrame;
-        }
-        break;
-    case SIO_FinalStatus:
-        if (DataIndex < ExpectedBytes) {
-            byte = DataBuffer[DataIndex++];
-            if (DataIndex >= ExpectedBytes) {
-                TransferStatus = SIO_NoFrame;
-            }
-            else {
-                if (DataIndex == 0)
-                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-                else
-                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
-            }
-        }
-        else {
-            Log_print("Invalid read frame!");
-            TransferStatus = SIO_NoFrame;
-        }
-        break;
+	switch (TransferStatus) {
+	case SIO_StatusRead:
+		byte = Command_Frame(DataBuffer);    /* Handle now the command */
+		break;
+	case SIO_FormatFrame:
+		TransferStatus = SIO_ReadFrame;
+		POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL << 3;
+		/* FALL THROUGH */
+	case SIO_ReadFrame:
+		if (DataIndex < ExpectedBytes) {
+			byte = DataBuffer[DataIndex++];
+			if (DataIndex >= ExpectedBytes) {
+				TransferStatus = SIO_NoFrame;
+			}
+			else {
+				/* set delay using the expected transfer speed */
+				POKEY_DELAYED_SERIN_IRQ = (DataIndex == 1) ? SIO_SERIN_INTERVAL
+					: ((SIO_SERIN_INTERVAL * POKEY_AUDF[POKEY_CHAN3] - 1) / 0x28 + 1);
+			}
+		}
+		else {
+			Log_print("Invalid read frame!");
+			TransferStatus = SIO_NoFrame;
+		}
+		break;
+	case SIO_FinalStatus:
+		if (DataIndex < ExpectedBytes) {
+			byte = DataBuffer[DataIndex++];
+			if (DataIndex >= ExpectedBytes) {
+				TransferStatus = SIO_NoFrame;
+			}
+			else {
+				if (DataIndex == 0)
+					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+				else
+					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
+			}
+		}
+		else {
+			Log_print("Invalid read frame!");
+			TransferStatus = SIO_NoFrame;
+		}
+		break;
 #ifdef USE_FUJINET
-    case SIO_FujiNet_Completion:
-        FUJINET_DEBUG_LOG("SIO_GetByte: Sending final SIO_COMPLETE (C) byte.");
-        byte = SIO_COMPLETE;
-        TransferStatus = SIO_NoFrame; // Now the transfer is fully complete
-        CommandIndex = 0;
-        /* Set CPU status registers to signal successful completion, like original SIO_Handler */
-        CPU_regY = 1; /* SUCCES */
-        CPU_ClrN;
-        CPU_SetC;
-        FUJINET_DEBUG_LOG("SIO_GetByte: Set CPU status registers Y=1, C=1, N=0");
-        /* DO NOT schedule next IRQ */
-        break;
+	case SIO_FujiNet_Completion:
+		FUJINET_DEBUG_LOG("SIO_GetByte: Sending final SIO_COMPLETE (C) byte.");
+		byte = SIO_COMPLETE;
+		TransferStatus = SIO_NoFrame; // Now the transfer is fully complete
+		CommandIndex = 0;
+		/* Set CPU status registers to signal successful completion, like original SIO_Handler */
+		CPU_regY = 1; /* SUCCES */
+		CPU_ClrN;
+		CPU_SetC;
+		FUJINET_DEBUG_LOG("SIO_GetByte: Set CPU status registers Y=1, C=1, N=0");
+		/* DO NOT schedule next IRQ */
+		break;
 #endif
-    default:
-        byte = CASSETTE_GetByte();
-        break;
-    }
-    return byte;
+	default:
+		byte = CASSETTE_GetByte();
+		break;
+	}
+	return byte;
 }
 
 #if !defined(BASIC) && !defined(__PLUS)
 int SIO_RotateDisks(void)
 {
-    char tmp_filenames[8][FILENAME_MAX];
-    int i;
-    int bSuccess = TRUE;
+	char tmp_filenames[8][FILENAME_MAX];
+	int i;
+	int bSuccess = TRUE;
 
-    for (i = 0; i < 8; i++) {
-        strcpy(tmp_filenames[i], SIO_filename[i]);
-        SIO_Dismount(i + 1);
-    }
+	for (i = 0; i < 8; i++) {
+		strcpy(tmp_filenames[i], SIO_filename[i]);
+		SIO_Dismount(i + 1);
+	}
 
-    for (i = 1; i < 8; i++) {
-        if (strcmp(tmp_filenames[i], "None") && strcmp(tmp_filenames[i], "Off") && strcmp(tmp_filenames[i], "Empty") ) {
-            if (!SIO_Mount(i, tmp_filenames[i], FALSE)) /* Note that this is NOT i-1 because SIO_Mount is 1 indexed */
-                bSuccess = FALSE;
-        }
-    }
+	for (i = 1; i < 8; i++) {
+		if (strcmp(tmp_filenames[i], "None") && strcmp(tmp_filenames[i], "Off") && strcmp(tmp_filenames[i], "Empty") ) {
+			if (!SIO_Mount(i, tmp_filenames[i], FALSE)) /* Note that this is NOT i-1 because SIO_Mount is 1 indexed */
+				bSuccess = FALSE;
+		}
+	}
 
-    i = 7;
-    while (i > -1 && (!strcmp(tmp_filenames[i], "None") || !strcmp(tmp_filenames[i], "Off") || !strcmp(tmp_filenames[i], "Empty")) ) {
-        i--;
-    }
+	i = 7;
+	while (i > -1 && (!strcmp(tmp_filenames[i], "None") || !strcmp(tmp_filenames[i], "Off") || !strcmp(tmp_filenames[i], "Empty")) ) {
+		i--;
+	}
 
-    if (i > -1)    {
-        if (!SIO_Mount(i + 1, tmp_filenames[0], FALSE))
-            bSuccess = FALSE;
-    }
+	if (i > -1)    {
+		if (!SIO_Mount(i + 1, tmp_filenames[0], FALSE))
+			bSuccess = FALSE;
+	}
 
-    return bSuccess;
+	return bSuccess;
 }
 #endif /* !defined(BASIC) && !defined(__PLUS) */
 
@@ -1632,42 +1726,42 @@ int SIO_RotateDisks(void)
 
 void SIO_StateSave(void)
 {
-    int i;
+	int i;
 
-    for (i = 0; i < 8; i++) {
-        StateSav_SaveINT((int *) &SIO_drive_status[i], 1);
-        StateSav_SaveFNAME(SIO_filename[i]);
-    }
+	for (i = 0; i < 8; i++) {
+		StateSav_SaveINT((int *) &SIO_drive_status[i], 1);
+		StateSav_SaveFNAME(SIO_filename[i]);
+	}
 }
 
 void SIO_StateRead(void)
 {
-    int i;
+	int i;
 
-    for (i = 0; i < 8; i++) {
-        int saved_drive_status;
-        char filename[FILENAME_MAX];
+	for (i = 0; i < 8; i++) {
+		int saved_drive_status;
+		char filename[FILENAME_MAX];
 
-        StateSav_ReadINT(&saved_drive_status, 1);
-        SIO_drive_status[i] = (SIO_UnitStatus)saved_drive_status;
+		StateSav_ReadINT(&saved_drive_status, 1);
+		SIO_drive_status[i] = (SIO_UnitStatus)saved_drive_status;
 
-        StateSav_ReadFNAME(filename);
-        if (filename[0] == 0)
-            continue;
+		StateSav_ReadFNAME(filename);
+		if (filename[0] == 0)
+			continue;
 
-        /* If the disk drive wasn't empty or off when saved,
-           mount the disk */
-        switch (saved_drive_status) {
-        case SIO_READ_ONLY:
-            SIO_Mount(i + 1, filename, TRUE);
-            break;
-        case SIO_READ_WRITE:
-            SIO_Mount(i + 1, filename, FALSE);
-            break;
-        default:
-            break;
-        }
-    }
+		/* If the disk drive wasn't empty or off when saved,
+		   mount the disk */
+		switch (saved_drive_status) {
+		case SIO_READ_ONLY:
+			SIO_Mount(i + 1, filename, TRUE);
+			break;
+		case SIO_READ_WRITE:
+			SIO_Mount(i + 1, filename, FALSE);
+			break;
+		default:
+			break;
+		}
+	}
 }
 
 #endif /* BASIC */
