@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>  /* For nanosleep */
 
 #include "config.h"
 #include "fujinet_sio.h"
@@ -81,24 +82,53 @@ UBYTE FujiNet_SIO_ProcessCommand(const UBYTE *command_frame) {
     SIO_LOG_DEBUG("SIO_ProcessCommand called for device 0x%02X, cmd 0x%02X", 
                   command_frame[0], command_frame[1]);
 
-    /* Check if command is for the FujiNet device */
-    if (command_frame[0] != FUJINET_DEVICE_ID) {
-        SIO_LOG_DEBUG("Command not for FujiNet device (device ID 0x%02X)", command_frame[0]);
-        return FUJINET_SIO_ERROR_NAK; /* Not for us */
-    }
-
+    /* In NetSIO protocol, we handle all device IDs, not just FujiNet device */
     /* Reset receive buffers for new command */
     /* Reset any status indicators */
 
     /* Send the 5-byte SIO command frame encapsulated in an Altirra Custom Device message */
-    SIO_LOG_DEBUG("Sending SIO command frame...");
-    if (!Network_SendAltirraMessage(EVENT_SCRIPT_POST, FUJINET_DEVICE_ID, command_frame, 5)) {
-        SIO_LOG_ERROR("Failed to send Altirra message for SIO command");
+    SIO_LOG_DEBUG("Sending SIO command frame for device 0x%02X...", command_frame[0]);
+    
+    /* First, calculate and verify checksum before sending */
+    UBYTE checksum = 0;
+    for (int i = 0; i < 4; i++) {
+        checksum += command_frame[i];
+    }
+    
+    if (checksum != command_frame[4]) {
+        SIO_LOG_WARN("SIO command has invalid checksum: calculated 0x%02X, got 0x%02X", 
+                    checksum, command_frame[4]);
+        /* Continue anyway - might be an intentional non-standard checksum */
+    }
+    
+    /* Enhanced error handling for network send operation */
+    int send_attempts = 0;
+    int max_attempts = 3;
+    int success = 0;
+    
+    while (send_attempts < max_attempts && !success) {
+        send_attempts++;
+        success = Network_SendAltirraMessage(EVENT_SCRIPT_POST, command_frame[0], command_frame, 5);
+        
+        if (!success) {
+            if (send_attempts < max_attempts) {
+                SIO_LOG_WARN("Failed to send SIO command, retrying (attempt %d/%d)...", 
+                            send_attempts, max_attempts);
+                /* Short delay before retry */
+                static struct timespec ts = {0, 10000000}; /* 10ms */
+                nanosleep(&ts, NULL);
+            }
+        }
+    }
+    
+    if (!success) {
+        SIO_LOG_ERROR("Failed to send Altirra message for SIO command after %d attempts", max_attempts);
         /* Consider closing/resetting connection? */
         return FUJINET_SIO_ERROR_GENERAL;
     }
 
     /* Command sent successfully - SIO bus timing now handled by NetSIO hub */
+    SIO_LOG_DEBUG("SIO command sent successfully");
     return FUJINET_SIO_COMPLETE;
 }
 

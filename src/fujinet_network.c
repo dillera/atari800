@@ -363,7 +363,11 @@ int Network_ProcessAltirraMessage(void) {
     /* Read the 8-byte header */
     if (!Network_ReadExactBytes(header, 8, &header_len_read)) {
         NETWORK_LOG_DEBUG("Failed to read Altirra header.");
-        /* Error, timeout, or connection closed by peer */
+        /* Error, timeout, or connection closed by peer - don't crash, 
+           just return an error that can be handled gracefully */
+        if (!network_connected) {
+            NETWORK_LOG_WARN("Network connection lost during header read");
+        }
         return 0;
     }
     
@@ -387,6 +391,11 @@ int Network_ProcessAltirraMessage(void) {
         if (!Network_ReadExactBytes(payload, payload_len, &payload_len_read)) {
             NETWORK_LOG_DEBUG("Failed to read Altirra payload.");
             free(payload);
+            /* Error, timeout, or connection closed by peer - 
+               check connection status and log appropriately */
+            if (!network_connected) {
+                NETWORK_LOG_WARN("Network connection lost during payload read");
+            }
             return 0; /* Read error */
         }
     }
@@ -433,9 +442,61 @@ int Network_ProcessAltirraMessage(void) {
  */
 int Network_GetByte(uint8_t *byte) {
     unsigned long start_time = Util_time(); /* For timeout */
+    static unsigned long last_reconnect_attempt = 0;
+    const unsigned long reconnect_cooldown_ms = 5000; /* Only try reconnecting every 5 seconds */
     
     if (!network_connected) {
         NETWORK_LOG_ERROR("Network_GetByte called but not connected");
+        
+        /* Check if we should attempt reconnection */
+        unsigned long current_time = Util_time();
+        if (current_time - last_reconnect_attempt > reconnect_cooldown_ms) {
+            NETWORK_LOG_WARN("Attempting to reconnect to NetSIO hub...");
+            last_reconnect_attempt = current_time;
+            
+            /* Attempt to reopen socket and reconnect */
+            if (tcp_socket != INVALID_SOCKET) {
+                closesocket(tcp_socket);
+                tcp_socket = INVALID_SOCKET;
+            }
+            
+            /* Create new socket */
+            tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
+            if (tcp_socket == INVALID_SOCKET) {
+                NETWORK_LOG_ERROR("Failed to create socket for reconnection");
+                return 0;
+            }
+            
+            /* Try to connect to localhost on the default port */
+            struct sockaddr_in server;
+            struct hostent *hp;
+            
+            memset(&server, 0, sizeof(server));
+            server.sin_family = AF_INET;
+            server.sin_port = htons(FUJINET_DEFAULT_PORT);
+            
+            hp = gethostbyname(FUJINET_DEFAULT_HOST);
+            if (hp) {
+                memcpy(&server.sin_addr, hp->h_addr, hp->h_length);
+                
+                if (connect(tcp_socket, (struct sockaddr*)&server, sizeof(server)) == 0) {
+                    NETWORK_LOG_DEBUG("Reconnected to NetSIO hub successfully");
+                    network_connected = 1;
+                    network_rx_len = 0;
+                    network_rx_idx = 0;
+                    network_sio_status = 0;
+                } else {
+                    NETWORK_LOG_ERROR("Failed to reconnect: %s", strerror(errno));
+                    closesocket(tcp_socket);
+                    tcp_socket = INVALID_SOCKET;
+                }
+            } else {
+                NETWORK_LOG_ERROR("Failed to resolve hostname for reconnection");
+                closesocket(tcp_socket);
+                tcp_socket = INVALID_SOCKET;
+            }
+        }
+        
         return 0; /* Error */
     }
     

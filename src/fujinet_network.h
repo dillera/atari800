@@ -34,7 +34,7 @@ extern "C" {
 
 /* Network Configuration defaults */
 #define FUJINET_DEFAULT_HOST "localhost"
-#define FUJINET_DEFAULT_PORT 9997
+#define FUJINET_DEFAULT_PORT 9996
 
 /* Timeout for network operations (ms) */
 #define FUJINET_TIMEOUT_MS 500
