@@ -58,6 +58,9 @@ int FujiNet_SIO_PutByte(uint8_t byte);
 void FujiNet_SIO_SetMotorState(int on);
 int FujiNet_SIO_IsDeviceEnabled(void);
 
+int FujiNet_SIO_GetResponseBufferPos(void);
+int FujiNet_SIO_GetResponseBufferSize(void);
+
 #ifdef __cplusplus
 }
 #endif

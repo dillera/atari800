@@ -3,8 +3,9 @@
 
 #include "atari.h"
 #include "sio_state.h"
+#include "sio.h"
 
-/* SIO Command Frame structure */
+/* Command frame structure */
 typedef struct {
     UBYTE device_id;    /* Device ID (e.g., 0x31 for D1:, 0x70 for FujiNet) */
     UBYTE command;      /* Command code (e.g., 0x53 for Status) */
@@ -23,7 +24,7 @@ void SIO_Handler_Shutdown(void);
 void SIO_Handler_Process_Command(SIO_Command_Frame *cmd_frame, UBYTE *data, int length);
 
 /* Put a byte from the Atari to a device (refactored SIO_PutByte) */
-void SIO_Handler_Put_Byte(int byte);
+void SIO_Handler_Put_Byte(UBYTE byte);
 
 /* Get a byte from a device to the Atari (refactored SIO_GetByte) */
 int SIO_Handler_Get_Byte(void);

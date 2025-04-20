@@ -3,15 +3,40 @@
 #include <string.h>
 
 #include "atari.h"
-#include "sio_handler.h"
-#include "sio_state.h"
-#include "sio.h"
-#include "fujinet_sio_handler.h"
-#include "log.h"
-#include "memory.h"
+#include "config.h"
 #include "cpu.h"
+#include "memory.h"
 #include "pokey.h"
+#include "sio.h"
+#include "sio_state.h"
+#include "sio_handler.h"
+#include "fujinet_sio_handler.h"
+#include "fujinet.h"
+#include "fujinet_sio.h"
+#include "log.h"
 #include "cassette.h"
+
+/* Debug logging macros */
+#ifdef DEBUG_FUJINET
+#define SIO_HANDLER_DEBUG_LOG(msg, ...) \
+    do { \
+        Log_print("FujiNet DEBUG (sio_handler.c): " msg, ##__VA_ARGS__); \
+    } while(0)
+#else
+#define SIO_HANDLER_DEBUG_LOG(msg, ...) do {} while(0)
+#endif
+
+/* Debug logging macro for FUJINET if not defined */
+#ifndef FUJINET_DEBUG_LOG
+#ifdef DEBUG_FUJINET
+#define FUJINET_DEBUG_LOG(msg, ...) \
+    do { \
+        Log_print("FujiNet DEBUG: " msg, ##__VA_ARGS__); \
+    } while(0)
+#else
+#define FUJINET_DEBUG_LOG(msg, ...) do {} while(0)
+#endif
+#endif
 
 /* Internal state */
 static SIO_State current_state = SIO_STATE_IDLE;
@@ -22,187 +47,126 @@ static int data_buffer_size = 0;
 static SIO_Command_Frame current_command;
 static SIO_Device_Type current_device_type = SIO_DEVICE_NONE;
 
-/* Debug log macro */
-#ifdef DEBUG_FUJINET
-#define SIO_HANDLER_DEBUG_LOG(...) Log_print(__VA_ARGS__)
-#else
-#define SIO_HANDLER_DEBUG_LOG(...)
-#endif
-
 /* Initialize the SIO handler */
 int SIO_Handler_Init(void) {
-    /* Initialize state machine */
-    SIO_State_Init();
-    current_state = SIO_STATE_IDLE;
-    expected_bytes = 0;
+    /* Initialize state machine to expect command frames */
+    current_state = SIO_STATE_COMMAND_FRAME;
     current_byte_idx = 0;
+    expected_bytes = 5; /* Standard command frame is 5 bytes */
     
-    SIO_HANDLER_DEBUG_LOG("SIO Handler: Initialized");
+    SIO_HANDLER_DEBUG_LOG("SIO Handler: Initialized (state=%d)", current_state);
     return 1;
 }
 
 /* Shutdown the SIO handler */
 void SIO_Handler_Shutdown(void) {
-    /* Reset internal state */
-    current_state = SIO_STATE_IDLE;
-    expected_bytes = 0;
-    current_byte_idx = 0;
-    
     SIO_HANDLER_DEBUG_LOG("SIO Handler: Shutdown");
 }
 
 /* Process a command frame */
 void SIO_Handler_Process_Command(SIO_Command_Frame *cmd_frame, UBYTE *data, int length) {
-    SIO_HANDLER_DEBUG_LOG("SIO Handler: Processing command for device 0x%02X, command 0x%02X",
-                         cmd_frame->device_id, cmd_frame->command);
-    
-    /* Store command frame and data for later use */
-    memcpy(&current_command, cmd_frame, sizeof(SIO_Command_Frame));
+    /* Save data buffer for later use */
     data_buffer = data;
     data_buffer_size = length;
     
-    /* Check what type of device this is */
-    current_device_type = SIO_State_Is_Device_Handled(cmd_frame->device_id);
+    /* Create command array for FujiNet SIO processing */
+    UBYTE command_array[5];
+    command_array[0] = cmd_frame->device_id;
+    command_array[1] = cmd_frame->command;
+    command_array[2] = cmd_frame->aux1;
+    command_array[3] = cmd_frame->aux2;
+    command_array[4] = cmd_frame->checksum;
     
-    UBYTE result = 'N'; /* Default to NAK */
+    /* Debug log the command being sent to FujiNet */
+    SIO_HANDLER_DEBUG_LOG("SIO_Handler: Routing command to FujiNet: %02X %02X %02X %02X %02X",
+                        command_array[0], command_array[1], command_array[2], 
+                        command_array[3], command_array[4]);
     
-    switch (current_device_type) {
-        case SIO_DEVICE_FUJINET:
-            /* Handle FujiNet commands via the FujiNet SIO handler */
-            {
-                UBYTE fuji_command_frame[5];
-                
-                /* Assemble command frame for FujiNet */
-                fuji_command_frame[0] = cmd_frame->device_id;
-                fuji_command_frame[1] = cmd_frame->command;
-                fuji_command_frame[2] = cmd_frame->aux1;
-                fuji_command_frame[3] = cmd_frame->aux2;
-                fuji_command_frame[4] = cmd_frame->checksum;
-                
-                SIO_HANDLER_DEBUG_LOG("SIO Handler: Calling FujiNet handler with command frame: %02X %02X %02X %02X %02X",
-                                     fuji_command_frame[0], fuji_command_frame[1], fuji_command_frame[2],
-                                     fuji_command_frame[3], fuji_command_frame[4]);
-                
-                result = FujiNet_SIO_Process_Command_Frame(fuji_command_frame);
-                
-                if (result == 'A') { /* Command ACKed, expect data */
-                    /* Set up for data transfer */
-                    current_state = SIO_STATE_DATA_TO_ATARI;
-                    expected_bytes = FujiNet_SIO_Get_Expected_Bytes();
-                    current_byte_idx = 0;
-                    
-                    SIO_HANDLER_DEBUG_LOG("SIO Handler: FujiNet command ACKed, expecting %d bytes", expected_bytes);
-                    
-                    /* Schedule IRQ to signal first byte is ready */
-                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
-                } else {
-                    /* Reset to idle state */
-                    current_state = SIO_STATE_IDLE;
-                    SIO_HANDLER_DEBUG_LOG("SIO Handler: FujiNet command NOT ACKed, result=%c", result);
-                }
-            }
+    /* Process command through FujiNet */
+    UBYTE fujinet_response_byte = FujiNet_SIO_ProcessCommand(command_array);
+    
+    SIO_HANDLER_DEBUG_LOG("SIO_Handler: FujiNet_SIO_ProcessCommand returned %c (0x%02X)", 
+                       fujinet_response_byte, fujinet_response_byte);
+    
+    /* Map FujiNet result to SIO protocol response */
+    UBYTE sio_response;
+    switch (fujinet_response_byte) {
+        case 'A': /* ACK */
+            sio_response = 'A';
             break;
-            
-        case SIO_DEVICE_DISK:
-            /* Handle standard disk drive operations using original SIO code */
-            {
-                int unit = cmd_frame->device_id - 0x31;
-                UBYTE sio_result = 'N'; /* Default to NAK */
-                
-                SIO_HANDLER_DEBUG_LOG("SIO Handler: Handling disk command for unit %d", unit);
-                
-                /* Call appropriate disk functions based on command */
-                switch (cmd_frame->command) {
-                    case 0x53: /* Status */
-                        if (data_buffer_size == 4) {
-                            sio_result = SIO_DriveStatus(unit, data_buffer);
-                            if (sio_result == 'C') {
-                                result = 'A'; /* ACK */
-                                current_state = SIO_STATE_DATA_TO_ATARI;
-                                expected_bytes = 4;
-                                current_byte_idx = 0;
-                            }
-                        }
-                        break;
-                        
-                    case 0x52: /* Read Sector */
-                        {
-                            int realsize;
-                            int sector = (cmd_frame->aux2 << 8) + cmd_frame->aux1;
-                            
-                            SIO_SizeOfSector((UBYTE)unit, sector, &realsize, NULL);
-                            if (realsize == data_buffer_size) {
-                                sio_result = SIO_ReadSector(unit, sector, data_buffer);
-                                if (sio_result == 'C') {
-                                    result = 'A'; /* ACK */
-                                    current_state = SIO_STATE_DATA_TO_ATARI;
-                                    expected_bytes = realsize;
-                                    current_byte_idx = 0;
-                                }
-                            }
-                        }
-                        break;
-                        
-                    /* Handle other commands like Write, Format, etc. */
-                    default:
-                        SIO_HANDLER_DEBUG_LOG("SIO Handler: Unhandled disk command 0x%02X", cmd_frame->command);
-                        break;
-                }
-            }
+        case 'N': /* NAK */
+            sio_response = 'N';
             break;
-            
-        case SIO_DEVICE_CASSETTE:
-            /* Handle cassette operations */
-            SIO_HANDLER_DEBUG_LOG("SIO Handler: Handling cassette command");
-            /* ... cassette operations ... */
+        case 'C': /* COMPLETE */
+            sio_response = 'C';
             break;
-            
-        case SIO_DEVICE_NONE:
-        default:
-            SIO_HANDLER_DEBUG_LOG("SIO Handler: Device 0x%02X not handled", cmd_frame->device_id);
+        case 'E': /* ERROR */
+            sio_response = 'E';
             break;
+        default: /* Unknown response */
+            SIO_HANDLER_DEBUG_LOG("SIO_Handler: Unknown response byte: %c (0x%02X)", 
+                               fujinet_response_byte, fujinet_response_byte);
+            sio_response = 'E';
+            break;
+    }
+
+    /* If the command was acknowledged (device will send data),
+     * set state for data transfer. Otherwise, reset state machine
+     * to expect another command frame */
+    if (sio_response == 'A') {
+        SIO_HANDLER_DEBUG_LOG("SIO_Handler: FujiNet command ACKed, proceeding to data phase");
+        current_state = SIO_STATE_DATA_TO_ATARI;
+        expected_bytes = FujiNet_SIO_Get_Expected_Bytes();
+        current_byte_idx = 0;
+        
+        SIO_HANDLER_DEBUG_LOG("SIO_Handler: FujiNet command ACKed, expecting %d bytes", expected_bytes);
+        
+        /* Schedule IRQ to signal first byte is ready */
+        POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
+    } else {
+        SIO_HANDLER_DEBUG_LOG("SIO_Handler: FujiNet command NOT ACKed, resetting for next command");
+        /* Reset for next command frame */
+        current_state = SIO_STATE_COMMAND_FRAME;
+        current_byte_idx = 0;
+        expected_bytes = 5;
     }
     
     /* Set CPU registers based on result */
-    SIO_Handler_Set_CPU_Registers(result);
+    SIO_Handler_Set_CPU_Registers(sio_response);
 }
 
 /* Put a byte from the Atari to a device */
-void SIO_Handler_Put_Byte(int byte) {
+void SIO_Handler_Put_Byte(UBYTE byte) {
     SIO_HANDLER_DEBUG_LOG("SIO Handler: Put byte 0x%02X, current state=%d", byte, current_state);
     
     switch (current_state) {
         case SIO_STATE_COMMAND_FRAME:
-            /* Building command frame */
-            if (current_byte_idx < 5) {
-                UBYTE *cmd_bytes = (UBYTE *)&current_command;
-                cmd_bytes[current_byte_idx++] = byte;
+            /* Collect bytes for the command frame */
+            if (current_byte_idx < expected_bytes) {
+                /* Store byte in command frame */
+                UBYTE *frame_bytes = (UBYTE *)&current_command;
+                frame_bytes[current_byte_idx++] = byte;
                 
-                SIO_HANDLER_DEBUG_LOG("SIO Handler: Command frame byte %d: 0x%02X", current_byte_idx, byte);
+                SIO_HANDLER_DEBUG_LOG("SIO Handler: Command frame byte %d = 0x%02X", 
+                                     current_byte_idx - 1, byte);
                 
-                if (current_byte_idx == 5) {
-                    /* Complete command frame received */
+                if (current_byte_idx >= expected_bytes) {
+                    /* We have a complete command frame, process it */
                     SIO_HANDLER_DEBUG_LOG("SIO Handler: Full command frame received: %02X %02X %02X %02X %02X",
                                          current_command.device_id, current_command.command,
                                          current_command.aux1, current_command.aux2,
                                          current_command.checksum);
                     
-                    /* Check device type */
-                    current_device_type = SIO_State_Is_Device_Handled(current_command.device_id);
+                    /* Process the command */
+                    SIO_Handler_Process_Command(&current_command, NULL, 0);
                     
-                    if (current_device_type != SIO_DEVICE_NONE) {
-                        /* Valid device, transition to wait for ACK */
-                        current_state = SIO_STATE_WAIT_ACK;
-                        POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
-                    } else {
-                        /* Invalid device, reset state */
-                        SIO_HANDLER_DEBUG_LOG("SIO Handler: Invalid device ID 0x%02X", current_command.device_id);
-                        current_state = SIO_STATE_IDLE;
-                    }
+                    /* Reset for next command frame */
+                    current_byte_idx = 0;
                 }
             } else {
                 SIO_HANDLER_DEBUG_LOG("SIO Handler: ERROR - Too many command frame bytes");
-                current_state = SIO_STATE_IDLE;
+                /* Reset to start of command frame */
+                current_byte_idx = 0;
             }
             break;
             
@@ -252,85 +216,95 @@ void SIO_Handler_Put_Byte(int byte) {
 
 /* Get a byte from a device to the Atari */
 int SIO_Handler_Get_Byte(void) {
-    int byte = 0;
-    
     SIO_HANDLER_DEBUG_LOG("SIO Handler: Get byte, current state=%d", current_state);
     
+    int result_byte = 0;
+    
     switch (current_state) {
-        case SIO_STATE_WAIT_ACK:
-            /* Process command and get status */
-            {
-                UBYTE *data = NULL;
-                int length = 0;
-                
-                /* Call original SIO_Handler equivalent */
-                SIO_Handler_Process_Command(&current_command, data, length);
-                
-                /* Return ACK/NAK as appropriate (will be set by Process_Command) */
-                byte = CPU_regA;
-            }
-            break;
-            
         case SIO_STATE_DATA_TO_ATARI:
-            /* Return data from device to Atari */
-            if (current_device_type == SIO_DEVICE_FUJINET) {
-                /* Get byte from FujiNet */
-                int is_last_byte = 0;
-                int fuji_byte = FujiNet_SIO_Get_Byte(&is_last_byte);
+            /* Check if we have a data buffer */
+            if (data_buffer != NULL && current_byte_idx < data_buffer_size) {
+                /* Return byte from data buffer */
+                result_byte = data_buffer[current_byte_idx++];
                 
-                if (fuji_byte >= 0) {
-                    byte = fuji_byte;
-                    current_byte_idx++;
+                /* Schedule next byte */
+                if (current_byte_idx < data_buffer_size) {
+                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
+                } else {
+                    /* Last byte sent, next we'll send completion */
+                    current_state = SIO_STATE_COMPLETION;
+                    POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
+                }
+                return result_byte;
+            } else {
+                /* Try getting data from FujiNet */
+                uint8_t fuji_byte;
+                int fuji_result = FujiNet_SIO_GetByte(&fuji_byte);
+                
+                if (fuji_result == 1) {
+                    int current_pos = FujiNet_SIO_GetResponseBufferPos();
+                    int buffer_size = FujiNet_SIO_GetResponseBufferSize();
                     
-                    /* Schedule next byte IRQ */
-                    if (is_last_byte) {
-                        /* Last byte, transition to completion */
+                    SIO_HANDLER_DEBUG_LOG("SIO Handler: Got byte 0x%02X from FujiNet (%d/%d)", 
+                                         fuji_byte, current_pos, buffer_size);
+                    
+                    /* If this was the last byte, transition to completion */
+                    if (current_pos >= buffer_size) {
                         current_state = SIO_STATE_COMPLETION;
                         POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
                     } else {
-                        /* More bytes to come */
+                        /* Schedule next byte */
                         POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
                     }
-                } else {
-                    /* Error getting byte */
-                    SIO_HANDLER_DEBUG_LOG("SIO Handler: Error getting byte from FujiNet");
-                    current_state = SIO_STATE_ERROR;
-                    byte = 'E';
-                }
-            } else if (current_device_type == SIO_DEVICE_DISK) {
-                /* Get byte from data buffer */
-                if (current_byte_idx < expected_bytes) {
-                    byte = data_buffer[current_byte_idx++];
                     
-                    if (current_byte_idx >= expected_bytes) {
-                        /* All data sent, transition to idle */
-                        current_state = SIO_STATE_IDLE;
-                    } else {
-                        /* Schedule next byte IRQ */
-                        POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
-                    }
+                    return fuji_byte;
                 } else {
-                    SIO_HANDLER_DEBUG_LOG("SIO Handler: ERROR - Trying to read beyond data buffer");
-                    current_state = SIO_STATE_ERROR;
-                    byte = 'E';
+                    SIO_HANDLER_DEBUG_LOG("SIO Handler: Error getting byte from FujiNet");
+                    /* Reset to command frame state on error */
+                    current_state = SIO_STATE_COMMAND_FRAME;
+                    current_byte_idx = 0;
+                    expected_bytes = 5;
+                    return SIO_ERROR_FRAME;
                 }
+            }
+            break;
+            
+        case SIO_STATE_DATA_FROM_ATARI:
+            if (data_buffer != NULL && current_byte_idx < data_buffer_size) {
+                SIO_HANDLER_DEBUG_LOG("SIO Handler: Data from Atari (index=%d)", current_byte_idx);
+                return data_buffer[current_byte_idx++];
+            } else {
+                SIO_HANDLER_DEBUG_LOG("SIO Handler: ERROR - Trying to read beyond data buffer");
+                /* Reset to command frame state on error */
+                current_state = SIO_STATE_COMMAND_FRAME;
+                current_byte_idx = 0;
+                expected_bytes = 5;
+                return SIO_ERROR_FRAME;
             }
             break;
             
         case SIO_STATE_COMPLETION:
-            /* Send completion byte */
-            byte = 'C'; /* Command complete */
-            current_state = SIO_STATE_IDLE;
+            /* Send completion byte and reset for next command */
             SIO_HANDLER_DEBUG_LOG("SIO Handler: Sending completion byte");
-            break;
+            current_state = SIO_STATE_COMMAND_FRAME;
+            current_byte_idx = 0;
+            expected_bytes = 5;
+            return SIO_COMPLETE_FRAME;
             
         default:
-            /* Get byte from cassette if no other handler */
-            byte = CASSETTE_GetByte();
-            break;
+            /* In any other state, just return error and reset to command frame state */
+            SIO_HANDLER_DEBUG_LOG("SIO Handler: Get byte called in unexpected state %d", current_state);
+            current_state = SIO_STATE_COMMAND_FRAME;
+            current_byte_idx = 0;
+            expected_bytes = 5;
+            return SIO_ERROR_FRAME;
     }
     
-    return byte;
+    /* Should not reach here, but just in case */
+    current_state = SIO_STATE_COMMAND_FRAME;
+    current_byte_idx = 0;
+    expected_bytes = 5;
+    return SIO_ERROR_FRAME;
 }
 
 /* Set CPU registers based on SIO result */
