@@ -921,8 +921,6 @@ int SIO_DriveStatus(int unit, UBYTE *buffer /* UNUSED */)
 static int Command_Frame(UBYTE *data_buffer)
 {
 #ifdef USE_FUJINET
-    /* FujiNet Path: Bypass original checksum, SIO_Handler, and result logic. */
-
     /* Check device ID (Allow D1: 0x31 and FujiNet device 0x70) */
     if (data_buffer[0] != 0x31 && data_buffer[0] != 0x70) {
         Log_print("SIO: FujiNet Command_Frame received for unsupported Device ID: 0x%02X", data_buffer[0]);
@@ -1072,29 +1070,30 @@ static int last_ypos = 0;
 /* SIO patch emulation routine */
 void SIO_Handler(void)
 {
-	int sector = MEMORY_dGetWordAligned(0x30a);
-	int unit;
-	UBYTE result = 0x00;
+	UBYTE sio_devic = MEMORY_dGetByte(0x300);
+	UBYTE sio_unit = MEMORY_dGetByte(0x301);
+	UBYTE cmd = MEMORY_dGetByte(0x302);
 	UWORD data = MEMORY_dGetWordAligned(0x304);
 	int length = MEMORY_dGetWordAligned(0x308);
-	int realsize = 0;
-	int cmd = MEMORY_dGetByte(0x302);
-    UBYTE sio_devic = MEMORY_dGetByte(0x300);
-    UBYTE sio_unit = MEMORY_dGetByte(0x301);
-    UBYTE sio_aux1 = MEMORY_dGetByte(0x30a); /* Low byte of sector/aux */
-    UBYTE sio_aux2 = MEMORY_dGetByte(0x30b); /* High byte of sector/aux */
+	UBYTE sio_aux1 = MEMORY_dGetByte(0x30a); /* Low byte of sector/aux */
+	UBYTE sio_aux2 = MEMORY_dGetByte(0x30b); /* High byte of sector/aux */
+
+	Log_print("SIO_Handler: Dev=0x%02X Unit=0x%02X Cmd=0x%02X Aux1=0x%02X Aux2=0x%02X Buf=0x%04X Len=%d",
+				  sio_devic, sio_unit, cmd, sio_aux1, sio_aux2, data, length);
 
 #ifdef USE_FUJINET
     /* Check for FujiNet device ID (0x70) */
+    Log_print("SIO_Handler: Checking for FujiNet device - Device=0x%02X, fujinet_enabled=%d", sio_devic, fujinet_enabled);
     UBYTE fujinet_response_byte = SIO_NAK; /* Declare response byte here for wider scope */
     if (sio_devic == 0x70 && fujinet_enabled) {
+        Log_print("SIO_Handler: FujiNet device detected, preparing command frame");
         UBYTE fuji_command_frame[5];
         UBYTE fuji_sio_status[4];
         UBYTE fuji_data_buffer[FUJINET_BUFFER_SIZE]; /* Use FujiNet's max buffer */
         int fuji_bytes_received = 0;
         UBYTE fuji_result;
         
-        Log_print("SIO: Detected FujiNet device (0x70), attempting FujiNet command...");
+        Log_print("FujiNet device command frame received");
         
         /* Assemble command frame */
         fuji_command_frame[0] = sio_devic; 
@@ -1103,11 +1102,17 @@ void SIO_Handler(void)
         fuji_command_frame[3] = sio_aux2;
         fuji_command_frame[4] = SIO_ChkSum(fuji_command_frame, 4); /* Checksum of first 4 bytes */
         
+        Log_print("SIO_Handler: Calling FujiNet_ProcessCommand with command frame: %02X %02X %02X %02X %02X",
+                  fuji_command_frame[0], fuji_command_frame[1], fuji_command_frame[2], 
+                  fuji_command_frame[3], fuji_command_frame[4]);
+        
         fuji_result = FujiNet_ProcessCommand(
             fuji_command_frame /* Pass the 5-byte command directly */
         );
         /* --- End FujiNet Call --- */
 
+        Log_print("SIO_Handler: FujiNet_ProcessCommand returned 0x%02X", fuji_result);
+        
         /* Send the immediate response byte from FujiNet */
         SIO_PutByte(fuji_result);
 
@@ -1145,7 +1150,7 @@ void SIO_Handler(void)
            it's probably harmless. */
         MEMORY_dPutByte(0x023a, unit); /* sta CDEVIC */
         MEMORY_dPutByte(0x023b, cmd); /* sta CCOMND */
-        MEMORY_dPutWordAligned(0x023c, sector); /* sta CAUX1; sta CAUX2 */
+        MEMORY_dPutWordAligned(0x023c, (sio_aux2 << 8) + sio_aux1); /* sta CAUX1; sta CAUX2 */
 
         /* Disk 1 is ASCII '1' = 0x31 etc */
         /* Disk 1 -> unit = 0 */
@@ -1182,10 +1187,10 @@ void SIO_Handler(void)
             case 0x57:
             case 0xD0:                /* xf551 hispeed */
             case 0xD7:
-                SIO_SizeOfSector((UBYTE)unit, sector, &realsize, NULL);
+                SIO_SizeOfSector((UBYTE)unit, (sio_aux2 << 8) + sio_aux1, &realsize, NULL);
                 if (realsize == length) {
                     MEMORY_CopyFromMem(data, DataBuffer, realsize);
-                    result = SIO_WriteSector(unit, sector, DataBuffer);
+                    result = SIO_WriteSector(unit, (sio_aux2 << 8) + sio_aux1, DataBuffer);
                 }
                 else
                     result = 'E';
@@ -1194,7 +1199,7 @@ void SIO_Handler(void)
             case 0xD2:                /* xf551 hispeed */
 
 # ifndef NO_SECTOR_DELAY
-    if (sector == 1) {
+    if ((sio_aux2 << 8) + sio_aux1 == 1) {
                 if (delay_counter > 0) {
                     if (last_ypos != ANTIC_ypos) {
                         last_ypos = ANTIC_ypos;
@@ -1209,9 +1214,9 @@ void SIO_Handler(void)
                 delay_counter = 0;
             }
 # endif
-    SIO_SizeOfSector((UBYTE)unit, sector, &realsize, NULL);
+    SIO_SizeOfSector((UBYTE)unit, (sio_aux2 << 8) + sio_aux1, &realsize, NULL);
                 if (realsize == length) {
-                    result = SIO_ReadSector(unit, sector, DataBuffer);
+                    result = SIO_ReadSector(unit, (sio_aux2 << 8) + sio_aux1, DataBuffer);
                     if (result == 'C')
                         MEMORY_CopyToMem(DataBuffer, data, realsize);
                 }

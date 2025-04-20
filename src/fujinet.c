@@ -510,10 +510,10 @@ int FujiNet_Initialise(const char *host_port) {
     }
     
     /* Connect to the server */
-    Log_print("FujiNet: Connecting to server...");
+    Log_print("FujiNet: Connecting to NetSIO hub at %s:%d...", host, port);
     result = connect(tcp_socket, (struct sockaddr*)&server, sizeof(server));
     if (result < 0) {
-        Log_print("FujiNet: Failed to connect: %s", strerror(errno));
+        Log_print("FujiNet: Failed to connect to NetSIO hub: %s (errno=%d)", strerror(errno), errno);
         closesocket(tcp_socket);
         tcp_socket = INVALID_SOCKET;
 #ifndef HAVE_SOCKET
@@ -526,8 +526,9 @@ int FujiNet_Initialise(const char *host_port) {
 
     /* Send EVENT_CONNECTED immediately after connecting */
     uint8_t connected_event = EVENT_CONNECTED;
+    Log_print("FujiNet: Sending EVENT_CONNECTED (0x%02X) to NetSIO hub", connected_event);
     if (send_tcp_data(&connected_event, 1) <= 0) {
-        Log_print("FujiNet: Failed to send EVENT_CONNECTED");
+        Log_print("FujiNet: Failed to send EVENT_CONNECTED to NetSIO hub");
         /* Decide if this is fatal? Maybe log and continue? */
         /* For now, let's continue and see what happens */
         // closesocket(tcp_socket);
@@ -537,7 +538,7 @@ int FujiNet_Initialise(const char *host_port) {
     }
 
     fujinet_enabled = 1; /* Set enabled *after* successful connection and initial message */
-    Log_print("FujiNet: Device initialized successfully (assuming connection implies readiness)");
+    Log_print("FujiNet: Device initialized successfully - fujinet_enabled=%d", fujinet_enabled);
     return 1;
 }
 
