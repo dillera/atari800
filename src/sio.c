@@ -921,8 +921,8 @@ int SIO_DriveStatus(int unit, UBYTE *buffer /* UNUSED */)
 static int Command_Frame(UBYTE *data_buffer)
 {
 #ifdef USE_FUJINET
-    /* Check device ID (Allow D1: 0x31 and FujiNet device 0x70) */
-    if (data_buffer[0] != 0x31 && data_buffer[0] != 0x70) {
+    /* Check device ID (Allow disk drives D1-D8: 0x31-0x38 and FujiNet device 0x70) */
+    if ((data_buffer[0] < 0x31 || data_buffer[0] > 0x38) && data_buffer[0] != 0x70) {
         Log_print("SIO: FujiNet Command_Frame received for unsupported Device ID: 0x%02X", data_buffer[0]);
         SIO_PutByte(SIO_NAK); /* Send NAK for wrong device */
         TransferStatus = SIO_NoFrame;
@@ -972,7 +972,7 @@ static int Command_Frame(UBYTE *data_buffer)
 
  	/* Check device ID */
  #ifdef USE_FUJINET
- 	if (data_buffer[0] != 0x31 && data_buffer[0] != 0x70) { /* Allow both D1: and FujiNet devices */
+ 	if ((data_buffer[0] < 0x31 || data_buffer[0] > 0x38) && data_buffer[0] != 0x70) { /* Allow both D1: and FujiNet devices */
  #else
  	if (data_buffer[0] != 0x31) { /* Only device D1: supported for now */
  #endif
@@ -1085,8 +1085,8 @@ void SIO_Handler(void)
     /* Check for FujiNet device ID (0x70) */
     Log_print("SIO_Handler: Checking for FujiNet device - Device=0x%02X, fujinet_enabled=%d", sio_devic, fujinet_enabled);
     UBYTE fujinet_response_byte = SIO_NAK; /* Declare response byte here for wider scope */
-    if (sio_devic == 0x70 && fujinet_enabled) {
-        Log_print("SIO_Handler: FujiNet device detected, preparing command frame");
+    if (fujinet_enabled && (sio_devic == 0x70 || (sio_devic >= 0x31 && sio_devic <= 0x38))) {
+        Log_print("SIO_Handler: Processing device ID 0x%02X via FujiNet, preparing command frame", sio_devic);
         UBYTE fuji_command_frame[5];
         UBYTE fuji_sio_status[4];
         UBYTE fuji_data_buffer[FUJINET_BUFFER_SIZE]; /* Use FujiNet's max buffer */
@@ -1399,7 +1399,6 @@ void SIO_PutByte(int byte)
 #ifdef USE_FUJINET
                 else if (CommandFrame[0] == 0x70) {
                     /* FujiNet device - send via NetSIO */
-                    Log_print("FujiNet device command frame received");
                     TransferStatus = SIO_StatusRead;
                     POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
                 }
