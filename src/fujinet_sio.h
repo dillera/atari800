@@ -36,6 +36,10 @@ extern "C" {
 #define FUJINET_DEVICE_ID 0x70
 
 /* SIO command response codes */
+#define SIO_COMMAND_ACCEPTED 0x01  /* Command was accepted and sent to NetSIO hub */
+#define FUJINET_SIO_ERROR    0xFF  /* Error sending command to NetSIO hub */
+
+/* Legacy FujiNet SIO response codes - kept for reference */
 #define FUJINET_SIO_COMPLETE      0x01  /* Command completed, no error */
 #define FUJINET_SIO_ERROR_FRAME   0x8F  /* Command frame error */
 #define FUJINET_SIO_ERROR_DEVICE  0x90  /* Device error */

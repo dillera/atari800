@@ -39,29 +39,40 @@ extern "C" {
 /* Timeout for network operations (ms) */
 #define FUJINET_TIMEOUT_MS 500
 
-/* Altirra NetSIO Protocol constants */
-#define NETSIO_DATA_BYTE    0x01
-#define NETSIO_STATUS_BYTE  0x02
-#define NETSIO_COMMAND_OFF  0x10
+/* Constants for the NetSIO Altirra protocol */
+/* EVENT_* constants used for the custom Altirra device protocol */
+#define EVENT_SCRIPT_POST 0x01
+#define EVENT_CONNECTED 0xC0
+#define EVENT_RESET 0xFE
 
-#define EVENT_SCRIPT_POST   0x01
-#define EVENT_CONNECTED     0x02
-#define EVENT_DISCONNECTED  0x03
-#define EVENT_SHUTDOWN      0x04
+/* --- Altirra NetSIO protocol constants --- */
+/* Event types in the Altirra protocol */
+#define NETSIO_DATA_BYTE        0x01
+#define NETSIO_DATA_BLOCK       0x02
+#define NETSIO_COMMAND_ON       0x11
+#define NETSIO_COMMAND_OFF_SYNC 0x18
+#define NETSIO_SYNC_RESPONSE    0x81
+#define NETSIO_WARM_RESET       0xFE
+#define NETSIO_COLD_RESET       0xFF
 
 /* Public Function Declarations */
 int Network_Initialize(const char *host_port);
 void Network_Shutdown(void);
 int Network_IsConnected(void);
-
-/* NetSIO Protocol Functions */
-int Network_SendAltirraMessage(uint8_t event, uint8_t arg, const uint8_t *data, int data_len);
-int Network_ProcessAltirraMessage(void);
+int Network_SendData(const uint8_t *data, int len);
 int Network_GetByte(uint8_t *byte);
 int Network_PutByte(uint8_t byte);
+int Network_SendAltirraMessage(uint8_t event, uint8_t arg, const uint8_t *data, int data_len);
+uint8_t Network_GetSyncCounter(void);
 
-/* Helper Functions - may be made private if not needed externally */
-int Network_SendData(const uint8_t *data, int data_len);
+/* NetSIO synchronization functions */
+void Network_SetWaitingForSync(uint8_t sync_num);
+void Network_ClearWaitingForSync(void);
+int Network_IsWaitingForSync(void);
+uint8_t Network_GetWaitingSyncNum(void);
+
+/* NetSIO Protocol Functions */
+int Network_ProcessAltirraMessage(void);
 int Network_ReadExactBytes(uint8_t *buffer, int buffer_size, int *received_len);
 
 #ifdef __cplusplus

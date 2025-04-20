@@ -66,6 +66,13 @@ static socket_t tcp_socket = INVALID_SOCKET;
 static int network_connected = 0;
 static uint8_t network_sio_status = 0; /* Last status byte received */
 
+/* Sync request counter for NetSIO protocol */
+static uint8_t sync_request_counter = 0;
+
+/* Sync waiting state */
+static int waiting_for_sync = 0;
+static uint8_t waiting_sync_num = 0;
+
 /* Logging macros */
 #define NETWORK_LOG_ERROR(msg, ...) do { Log_print("FujiNet Network ERROR: " msg, ##__VA_ARGS__); } while(0)
 #define NETWORK_LOG_WARN(msg, ...) do { Log_print("FujiNet Network WARN: " msg, ##__VA_ARGS__); } while(0)
@@ -96,6 +103,31 @@ static uint32_t from_little_endian(uint32_t value) {
 #else
     return value;
 #endif
+}
+
+/* Set the waiting for sync flag with the sync number we're waiting for */
+void Network_SetWaitingForSync(uint8_t sync_num) {
+    waiting_for_sync = 1;
+    waiting_sync_num = sync_num;
+    NETWORK_LOG_DEBUG("Now waiting for sync response #%d", (unsigned int)sync_num);
+}
+
+/* Clear the waiting for sync flag */
+void Network_ClearWaitingForSync(void) {
+    if (waiting_for_sync) {
+        NETWORK_LOG_DEBUG("No longer waiting for sync response #%d", (unsigned int)waiting_sync_num);
+    }
+    waiting_for_sync = 0;
+}
+
+/* Check if we're waiting for a sync response */
+int Network_IsWaitingForSync(void) {
+    return waiting_for_sync;
+}
+
+/* Get the sync number we're waiting for */
+uint8_t Network_GetWaitingSyncNum(void) {
+    return waiting_sync_num;
 }
 
 /* Network operations implementation */
@@ -183,23 +215,17 @@ int Network_Initialize(const char *host_port) {
 }
 
 void Network_Shutdown(void) {
-    if (tcp_socket != INVALID_SOCKET) {
-        Log_print("FujiNet Network: Closing connection");
-        
-        /* Send shutdown event if connected */
-        if (network_connected) {
-            Network_SendAltirraMessage(EVENT_SHUTDOWN, 0, NULL, 0);
-        }
+    NETWORK_LOG_DEBUG("Network_Shutdown called");
+    
+    if (network_connected) {
+        /* No need to send a RESET command during normal operation */
+        NETWORK_LOG_DEBUG("Closing network connection gracefully");
         
         /* Close socket */
         closesocket(tcp_socket);
         tcp_socket = INVALID_SOCKET;
         network_connected = 0;
     }
-    
-#ifdef HAVE_WINDOWS_H
-    WSACleanup();
-#endif
 }
 
 int Network_IsConnected(void) {
@@ -308,38 +334,49 @@ int Network_ReadExactBytes(uint8_t *buffer, int buffer_size, int *received_len) 
 
 /* Send a message in the Altirra NetSIO Custom Protocol format */
 int Network_SendAltirraMessage(uint8_t event, uint8_t arg, const uint8_t *data, int data_len) {
-    uint8_t header[8];
-    uint32_t total_length;
+    /* Message format:
+       - 8-byte header:
+           - Bytes 0-3: Total length (header + payload) as little-endian 32-bit int
+           - Bytes 4-7: Timestamp (using 0)
+       - Payload:
+           - Byte 8: Event ID
+           - Byte 9: Argument byte
+           - Bytes 10+: Optional data */
+    
+    /* Calculate total message length: header (8) + event (1) + arg (1) + data */
+    uint32_t total_length = 8 + 2 + (data ? data_len : 0);
+    
+    /* Allocate a buffer for the complete message */
+    uint8_t *message = (uint8_t*)malloc(total_length);
+    if (!message) {
+        NETWORK_LOG_ERROR("Failed to allocate memory for Altirra message");
+        return 0;
+    }
     
     /* Build the header */
-    /* Fields:
-       Bytes 0-3: Total length (header + payload) as little-endian 32-bit int
-       Byte 4: Event ID
-       Byte 5: Argument byte
-       Bytes 6-7: Zero padding */
-    total_length = 8; /* Header size */
+    /* Convert total length to little-endian and set timestamp to 0 */
+    *(uint32_t*)message = to_little_endian(total_length);
+    *(uint32_t*)(message + 4) = 0; /* Zero timestamp */
+    
+    /* Set event ID and argument */
+    message[8] = event;
+    message[9] = arg;
+    
+    /* Copy payload data if present */
     if (data && data_len > 0) {
-        total_length += data_len;
+        memcpy(message + 10, data, data_len);
     }
     
-    /* Convert total length to little-endian */
-    *(uint32_t*)header = to_little_endian(total_length);
+    NETWORK_LOG_DEBUG("Sending Altirra message: Event=0x%02X, Arg=0x%02X, TotalLen=%d", 
+                      event, arg, total_length);
     
-    /* Event ID and argument */
-    header[4] = event;
-    header[5] = arg;
-    header[6] = header[7] = 0; /* Zero padding */
+    /* Send the complete message in a single network operation */
+    int success = Network_SendData(message, total_length);
+    free(message);
     
-    /* Send header */
-    if (!Network_SendData(header, 8)) {
-        return 0; /* Failed to send header */
-    }
-    
-    /* Send payload if present */
-    if (data && data_len > 0) {
-        if (!Network_SendData(data, data_len)) {
-            return 0; /* Failed to send payload */
-        }
+    if (!success) {
+        NETWORK_LOG_ERROR("Failed to send Altirra message");
+        return 0;
     }
     
     return 1; /* Success */
@@ -352,85 +389,144 @@ int Network_SendAltirraMessage(uint8_t event, uint8_t arg, const uint8_t *data, 
  *   0 if no message was available or an error occurred
  */
 int Network_ProcessAltirraMessage(void) {
-    uint8_t header[8];
-    int header_len_read;
-    uint8_t event, arg;
-    uint32_t total_len;
-    int payload_len;
-    uint8_t *payload = NULL;
-    int payload_len_read;
-
-    /* Read the 8-byte header */
-    if (!Network_ReadExactBytes(header, 8, &header_len_read)) {
-        NETWORK_LOG_DEBUG("Failed to read Altirra header.");
-        /* Error, timeout, or connection closed by peer - don't crash, 
-           just return an error that can be handled gracefully */
-        if (!network_connected) {
-            NETWORK_LOG_WARN("Network connection lost during header read");
-        }
-        return 0;
+    if (!network_connected) {
+        return -1; /* Not connected */
     }
     
-    /* Parse header */
-    total_len = from_little_endian(*(uint32_t*)header);
-    event = header[4];
-    arg = header[5];
+    /* Receive the message header (10 bytes) */
+    uint8_t header[10];
+    int received = 0;
     
-    payload_len = total_len - 8; /* Header is 8 bytes */
-    
-    NETWORK_LOG_DEBUG("Received Altirra Msg: Event=0x%02X, Arg=0x%02X, PayloadLen=%d", 
-                       (unsigned int)event, (unsigned int)arg, payload_len);
-    
-    /* Read payload if it exists */
-    if (payload_len > 0) {
-        payload = (uint8_t*)malloc(payload_len);
-        if (!payload) {
-            NETWORK_LOG_ERROR("Failed to allocate memory for payload of %d bytes", payload_len);
-            return 0; /* Memory allocation error */
+    if (!Network_ReadExactBytes(header, 10, &received)) {
+        if (received == 0) {
+            /* Socket closed or error */
+            Network_Shutdown();
+            return -1;
         }
+        
+        NETWORK_LOG_ERROR("Failed to read complete Altirra message header, got %d bytes", received);
+        return -1;
+    }
+    
+    /* Parse header fields */
+    uint32_t msg_len = header[0] | (header[1] << 8) | (header[2] << 16) | (header[3] << 24);
+    uint8_t event = header[8];
+    uint8_t arg = header[9];
+    
+    /* Calculate payload length (0 if none) */
+    uint32_t payload_len = (msg_len > 10) ? (msg_len - 10) : 0;
+    
+    /* Log event details */
+    NETWORK_LOG_DEBUG("Received Altirra Msg: Event=0x%02X, Arg=0x%02X, PayloadLen=%u", 
+                     (unsigned int)event, (unsigned int)arg, (unsigned int)payload_len);
+    
+    /* Read payload if present */
+    uint8_t *payload = NULL;
+    int payload_len_read = 0;
+    
+    if (payload_len > 0) {
+        payload = (uint8_t *)malloc(payload_len);
+        if (!payload) {
+            NETWORK_LOG_ERROR("Failed to allocate memory for payload");
+            return -1;
+        }
+        
         if (!Network_ReadExactBytes(payload, payload_len, &payload_len_read)) {
-            NETWORK_LOG_DEBUG("Failed to read Altirra payload.");
-            free(payload);
-            /* Error, timeout, or connection closed by peer - 
-               check connection status and log appropriately */
-            if (!network_connected) {
-                NETWORK_LOG_WARN("Network connection lost during payload read");
-            }
-            return 0; /* Read error */
+            NETWORK_LOG_WARN("Failed to read complete payload, got %d/%u bytes", 
+                             payload_len_read, (unsigned int)payload_len);
+            /* Continue processing with partial payload */
         }
     }
     
     /* Process based on event type */
     switch (event) {
-        case NETSIO_DATA_BYTE: /* 0x01 */
+        case 0x00: /* 0x00 - Null event or padding */
+            NETWORK_LOG_DEBUG("Received null event (0x00), likely padding - ignoring");
+            /* Just free any payload and return 0 to indicate no data processed */
+            if (payload) free(payload);
+            return 0;
+            
+        case NETSIO_DATA_BYTE: /* 0x01 - Single data byte */
+            /* Per NetSIO protocol and logs, the DATA_BYTE message has the actual data
+             * byte in the arg field, not in the payload */
+            
+            /* Store the data byte (from arg) in our buffer */
             if (network_rx_len < FUJINET_BUFFER_SIZE) {
                 network_rx_buffer[network_rx_len++] = (uint8_t)arg; 
-                NETWORK_LOG_DEBUG("Added byte 0x%02X to rx_buffer (new len=%d)", (unsigned int)arg, network_rx_len);
+                NETWORK_LOG_DEBUG("Added DATA_BYTE 0x%02X to rx_buffer (now len=%d)", 
+                                 (unsigned int)arg, network_rx_len);
             } else {
-                NETWORK_LOG_WARN("FujiNet RX buffer full! Discarding byte 0x%02X", (unsigned int)arg);
+                NETWORK_LOG_WARN("RX buffer full! Discarding byte 0x%02X", (unsigned int)arg);
             }
-            if (payload) free(payload);
-            return 1; /* Indicate data byte received */
             
-        case NETSIO_STATUS_BYTE: /* 0x02 - Final SIO status byte */
-            /* Store status byte for later retrieval */
+            if (payload) free(payload);
+            return 1; /* Indicate data received */
+            
+        case NETSIO_DATA_BLOCK: /* 0x02 - Multiple data bytes */
+            NETWORK_LOG_DEBUG("Received DATA_BLOCK (0x02) with %d bytes", payload_len_read);
+            
+            /* Process data block - add all payload bytes to our receive buffer */
+            if (payload && payload_len_read > 0) {
+                for (int i = 0; i < payload_len_read && network_rx_len < FUJINET_BUFFER_SIZE; i++) {
+                    network_rx_buffer[network_rx_len++] = payload[i];
+                    NETWORK_LOG_DEBUG("Added payload byte[%d]=0x%02X to rx_buffer (now len=%d)", 
+                                     i, payload[i], network_rx_len);
+                }
+            } else {
+                NETWORK_LOG_WARN("Received DATA_BLOCK with no payload data");
+            }
+            
+            if (payload) free(payload);
+            return 1; /* Indicate data received */
+            
+        case NETSIO_SYNC_RESPONSE: /* 0x81 - ACK/NAK response */
+            /* Per the actual protocol behavior, the sync response message has:
+             * - arg: the sync request number that this is responding to
+             * - data[0]: the actual ACK/NAK response (0x41 for ACK, 0x4E for NAK) 
+             */
+            NETWORK_LOG_DEBUG("Received SYNC_RESPONSE (0x81) for sync #%d", (unsigned int)arg);
+            
+            /* Check if this is the sync response we're waiting for */
+            if (Network_IsWaitingForSync() && arg == Network_GetWaitingSyncNum()) {
+                NETWORK_LOG_DEBUG("Received matching sync response, resuming CPU execution");
+                Network_ClearWaitingForSync();
+            }
+            
+            /* Check if we've received a payload with the ACK/NAK */
+            if (payload && payload_len_read >= 1) {
+                /* Store the ACK/NAK byte from the payload in our buffer */
+                if (network_rx_len < FUJINET_BUFFER_SIZE) {
+                    network_rx_buffer[network_rx_len++] = payload[0];
+                    NETWORK_LOG_DEBUG("Added ACK/NAK byte 0x%02X from payload to rx_buffer", payload[0]);
+                } else {
+                    NETWORK_LOG_WARN("RX buffer full! Discarding ACK/NAK byte 0x%02X", payload[0]);
+                }
+            } else {
+                /* If no payload, use arg as the ACK/NAK byte (based on our observation of logs) */
+                NETWORK_LOG_WARN("Received SYNC_RESPONSE with no payload, using default ACK");
+                if (network_rx_len < FUJINET_BUFFER_SIZE) {
+                    /* For Altirra protocol from NetSIO hub, 'A' (0x41) is ACK, 'N' (0x4E) is NAK */
+                    network_rx_buffer[network_rx_len++] = 0x41; /* Default to ACK */
+                }
+            }
+            
+            if (payload) free(payload);
+            return 1; /* Indicate response received */
+        
+        case NETSIO_COMMAND_OFF_SYNC: /* 0x18 - Command complete */
+            NETWORK_LOG_DEBUG("Received COMMAND_OFF_SYNC with status 0x%02X", (unsigned int)arg);
+            /* The arg is the completion status byte */
             network_sio_status = arg;
-            NETWORK_LOG_DEBUG("Stored SIO status byte: 0x%02X", network_sio_status);
-            if (payload) free(payload);
-            return -1; /* Signal status received */
+            sync_request_counter++;
             
-        case NETSIO_COMMAND_OFF: /* 0x10 - Placeholder for future status handling */
-            NETWORK_LOG_DEBUG("Received NETSIO_COMMAND_OFF (0x10) - Status handling TBD.");
-            /* TODO: Set a status variable (e.g., network_sio_status = SIO_COMPLETE/SIO_ERROR based on arg?) */
-            break;
+            if (payload) free(payload);
+            return -1; /* Signal completion status received */
             
         default:
-            NETWORK_LOG_DEBUG("Received unhandled event type: 0x%02X", (unsigned int)event);
-            break;
+            NETWORK_LOG_DEBUG("Unhandled Altirra event type 0x%02X", (unsigned int)event);
+            if (payload) free(payload);
+            return 0; /* No data to process */
     }
-    
-    if (payload) free(payload);
-    return 0; /* No data/status processed */
 }
 
 /* 
@@ -441,109 +537,29 @@ int Network_ProcessAltirraMessage(void) {
  *   0 if no byte is available (error or timeout)
  */
 int Network_GetByte(uint8_t *byte) {
-    unsigned long start_time = Util_time(); /* For timeout */
-    static unsigned long last_reconnect_attempt = 0;
-    const unsigned long reconnect_cooldown_ms = 5000; /* Only try reconnecting every 5 seconds */
-    
     if (!network_connected) {
-        NETWORK_LOG_ERROR("Network_GetByte called but not connected");
-        
-        /* Check if we should attempt reconnection */
-        unsigned long current_time = Util_time();
-        if (current_time - last_reconnect_attempt > reconnect_cooldown_ms) {
-            NETWORK_LOG_WARN("Attempting to reconnect to NetSIO hub...");
-            last_reconnect_attempt = current_time;
-            
-            /* Attempt to reopen socket and reconnect */
-            if (tcp_socket != INVALID_SOCKET) {
-                closesocket(tcp_socket);
-                tcp_socket = INVALID_SOCKET;
-            }
-            
-            /* Create new socket */
-            tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
-            if (tcp_socket == INVALID_SOCKET) {
-                NETWORK_LOG_ERROR("Failed to create socket for reconnection");
-                return 0;
-            }
-            
-            /* Try to connect to localhost on the default port */
-            struct sockaddr_in server;
-            struct hostent *hp;
-            
-            memset(&server, 0, sizeof(server));
-            server.sin_family = AF_INET;
-            server.sin_port = htons(FUJINET_DEFAULT_PORT);
-            
-            hp = gethostbyname(FUJINET_DEFAULT_HOST);
-            if (hp) {
-                memcpy(&server.sin_addr, hp->h_addr, hp->h_length);
-                
-                if (connect(tcp_socket, (struct sockaddr*)&server, sizeof(server)) == 0) {
-                    NETWORK_LOG_DEBUG("Reconnected to NetSIO hub successfully");
-                    network_connected = 1;
-                    network_rx_len = 0;
-                    network_rx_idx = 0;
-                    network_sio_status = 0;
-                } else {
-                    NETWORK_LOG_ERROR("Failed to reconnect: %s", strerror(errno));
-                    closesocket(tcp_socket);
-                    tcp_socket = INVALID_SOCKET;
-                }
-            } else {
-                NETWORK_LOG_ERROR("Failed to resolve hostname for reconnection");
-                closesocket(tcp_socket);
-                tcp_socket = INVALID_SOCKET;
-            }
-        }
-        
-        return 0; /* Error */
+        NETWORK_LOG_ERROR("Attempted to receive data while not connected.");
+        return -1;
     }
     
-    while (1) { /* Loop until byte/status returned or timeout */
-        int process_result;
-        
-        /* Priority 1: Check if final SIO status byte was already received */
-        if (network_sio_status != 0) {
-            NETWORK_LOG_DEBUG("Returning stored SIO status 0x%02X", network_sio_status);
-            *byte = network_sio_status;
-            network_sio_status = 0; /* Clear status */
-            return -1; /* Indicate final status byte */
-        }
-        
-        /* Priority 2: Check if data is available in the buffer */
-        if (network_rx_idx < network_rx_len) {
-            *byte = network_rx_buffer[network_rx_idx++];
-            NETWORK_LOG_DEBUG("Returning buffered byte 0x%02X (idx=%d, len=%d)", *byte, network_rx_idx, network_rx_len);
-            return 1; /* Indicate data byte */
-        }
-        
-        /* Priority 3: Try to read new data from the socket if buffer is empty */
-        if (network_rx_idx >= network_rx_len && network_sio_status == 0) {
-            NETWORK_LOG_DEBUG("No data in buffer, attempting receive_tcp_data...");
-            process_result = Network_ProcessAltirraMessage(); 
-            
-            if (process_result == 1) { /* Data byte added to buffer */
-                NETWORK_LOG_DEBUG("Data byte added to buffer.");
-                start_time = Util_time(); 
-                continue;
-            } else if (process_result == -1) { /* SIO status byte received */
-                NETWORK_LOG_DEBUG("SIO status byte received.");
-                start_time = Util_time();
-                continue; /* Status is now stored in network_sio_status, will be handled next loop */
-            } else { /* process_result == 0: Error or no message ready */
-                NETWORK_LOG_DEBUG("Checking for timeout...");
-                if (Util_time() - start_time > FUJINET_TIMEOUT_MS) {
-                    NETWORK_LOG_WARN("Network_GetByte: Timeout (%lums) waiting for data/status from hub.", FUJINET_TIMEOUT_MS);
-                    return 0; /* Indicate timeout/error */
-                }
-                /* loop will check Util_time timeout shortly. */
-            }
-        }
+    /* Check if we have buffered data from previous reads */
+    if (network_rx_idx < network_rx_len) {
+        *byte = network_rx_buffer[network_rx_idx++];
+        NETWORK_LOG_DEBUG("Returning buffered byte: 0x%02X (idx=%d/%d)", 
+                      *byte, network_rx_idx, network_rx_len);
+        return 1;
     }
     
-    /* Should not be reached if timeout logic inside loop is correct */
-    return 0; /* Error/Timeout */
+    /* Reset the buffer for a new receive operation */
+    network_rx_idx = 0;
+    network_rx_len = 0;
+    
+    if (Network_ProcessAltirraMessage() == 1) {
+        *byte = network_rx_buffer[network_rx_idx++];
+        return 1;
+    }
+    
+    return 0;
 }
 
 /* Send a byte to the NetSIO hub */
@@ -561,4 +577,9 @@ int Network_PutByte(uint8_t byte) {
     }
     
     return 1;
+}
+
+/* Get the current sync request counter value */
+uint8_t Network_GetSyncCounter(void) {
+    return sync_request_counter;
 }

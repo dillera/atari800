@@ -577,6 +577,21 @@ void CPU_GO(int limit)
 
    2. The timing of the IRQs are not that critical. */
 
+    /* Check if we're waiting for a NetSIO sync response */
+#ifndef FALCON_CPUASM
+    /* Only in standard C implementation, not in assembly */
+    extern int Network_IsWaitingForSync(void);
+    if (Network_IsWaitingForSync()) {
+        /* Skip execution while waiting for sync response */
+        CPU_regPC = PC;
+        CPU_regA = A;
+        CPU_regX = X;
+        CPU_regY = Y;
+        CPU_regS = S;
+        return;
+    }
+#endif
+
 	if (ANTIC_wsync_halt) {
 
 #ifdef NEW_CYCLE_EXACT
