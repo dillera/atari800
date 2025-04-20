@@ -72,6 +72,8 @@ atari800_SOURCES = \
 	devices.c devices.h \
 	esc.c esc.h \
 	fujinet.c fujinet.h \
+	fujinet_network.c fujinet_network.h \
+	fujinet_sio.c fujinet_sio.h \
 	gtia.c gtia.h \
 	img_tape.c img_tape.h \
 	log.c log.h \

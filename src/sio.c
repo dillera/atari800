@@ -25,28 +25,45 @@
 #define _POSIX_C_SOURCE 200112L /* for snprintf */
 
 #include "config.h"
+#include "atari.h"
+#include "log.h"
+#include "memory.h"
+#include "cfg.h"
+#include "afile.h"
+#include "sio.h"
+#include "pokey.h"
+#include "cassette.h"
+#include "rdevice.h"
+#include "util.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-#include "afile.h"
 #include "antic.h"  /* ANTIC_ypos */
-#include "atari.h"
 #include "binload.h"
-#include "cassette.h"
 #include "compfile.h"
 #include "cpu.h"
 #include "esc.h"
+
+/* Workaround: Force DEBUG_FUJINET definition for sio.c */
+#define DEBUG_FUJINET 1
 #include "fujinet.h"
-#include "log.h"
-#include "memory.h"
+
+#ifdef USE_FUJINET
+#endif /* USE_FUJINET */
+
 #include "platform.h"
-#include "pokey.h"
 #include "pokeysnd.h"
-#include "sio.h"
 #include "statesav.h"
-#include "util.h"
+
+/* Workaround: Direct definition for FUJINET_DEBUG_LOG in sio.c */
+#ifdef DEBUG_FUJINET
+#define FUJINET_DEBUG_LOG(msg, ...) do { Log_print("FujiNet DEBUG (sio.c): " msg, ##__VA_ARGS__); } while(0)
+#else
+#define FUJINET_DEBUG_LOG(msg, ...) ((void)0)
+#endif
 
 /* SIO Status Codes (internal) */
 #define SIO_OK             0
@@ -185,6 +202,7 @@ char SIO_status[256];
 #define SIO_WriteFrame      (0x04)
 #define SIO_FinalStatus     (0x05)
 #define SIO_FormatFrame     (0x06)
+#define SIO_DataSend        (0x07)
 static UBYTE CommandFrame[6];
 static int CommandIndex = 0;
 static UBYTE DataBuffer[256 + 3];
@@ -946,15 +964,19 @@ static int Command_Frame(UBYTE *data_buffer)
     /* Send the immediate response byte from FujiNet */
     SIO_PutByte(fujinet_response_byte);
 
-    /* Reset SIO state machine; FujiNet handles data transfer phase via Get/Put Byte */
-    TransferStatus = SIO_NoFrame;
-    CommandIndex = 0; /* Reset index for next command */
-
-    /* Determine return value based on response */
-    if (fujinet_response_byte == SIO_ACK || fujinet_response_byte == SIO_COMPLETE_FRAME) {
-        return SIO_OK; /* Indicate success to caller (SIO_PutByte state machine) */
+    /* If the command was NOT acknowledged immediately (e.g., NAK, Error),
+     * then reset the SIO state machine. If it WAS acknowledged (ACK),
+     * leave the TransferStatus alone so the SIO state machine proceeds
+     * to the data transfer phase (calling GetByte/PutByte). */
+    if (fujinet_response_byte != SIO_ACK) {
+         Log_print("SIO_Handler: FujiNet command failed immediately (0x%02X), resetting SIO state.", fujinet_response_byte);
+         TransferStatus = SIO_NoFrame;
+         CommandIndex = 0; /* Reset index for next command */
     } else {
-        return SIO_ERROR; /* Indicate error/NAK */
+        Log_print("SIO_Handler: FujiNet command ACKed (0x%02X), proceeding to data phase.", fujinet_response_byte);
+        /* Set TransferStatus to indicate data transfer from device to OS is expected */
+        TransferStatus = SIO_DataSend;
+        CommandIndex = 0; /* Reset CommandIndex for data phase */
     }
 #else /* Original SIO Logic */
 #endif /* USE_FUJINET */
@@ -1116,16 +1138,21 @@ void SIO_Handler(void)
         /* Send the immediate response byte from FujiNet */
         SIO_PutByte(fuji_result);
 
-        /* Reset SIO state machine; FujiNet handles data transfer phase via Get/Put Byte */
-        TransferStatus = SIO_NoFrame;
-        CommandIndex = 0; /* Reset index for next command */
-
-        /* Determine return value based on response */
-        if (fuji_result == SIO_ACK || fuji_result == SIO_COMPLETE_FRAME) {
-            return; /* Indicate success to caller (SIO_PutByte state machine) */
+        /* If the command was NOT acknowledged immediately (e.g., NAK, Error),
+         * then reset the SIO state machine. If it WAS acknowledged (ACK),
+         * leave the TransferStatus alone so the SIO state machine proceeds
+         * to the data transfer phase (calling GetByte/PutByte). */
+        if (fuji_result != SIO_ACK) {
+             Log_print("SIO_Handler: FujiNet command failed immediately (0x%02X), resetting SIO state.", fuji_result);
+             TransferStatus = SIO_NoFrame;
+             CommandIndex = 0; /* Reset index for next command */
         } else {
-            return; /* Indicate error/NAK */
+            Log_print("SIO_Handler: FujiNet command ACKed (0x%02X), proceeding to data phase.", fuji_result);
+            /* Set TransferStatus to indicate data transfer from device to OS is expected */
+            TransferStatus = SIO_DataSend;
+            CommandIndex = 0; /* Reset CommandIndex for data phase */
         }
+        return; /* FujiNet handled the command, prevent fallthrough */
     } else {
 #endif /* USE_FUJINET */
         /* Original SIO Handling starts here */
@@ -1150,7 +1177,7 @@ void SIO_Handler(void)
            it's probably harmless. */
         MEMORY_dPutByte(0x023a, unit); /* sta CDEVIC */
         MEMORY_dPutByte(0x023b, cmd); /* sta CCOMND */
-        MEMORY_dPutWordAligned(0x023c, (sio_aux2 << 8) + sio_aux1); /* sta CAUX1; sta CAUX2 */
+        MEMORY_dPutByte(0x023c, (sio_aux2 << 8) + sio_aux1); /* sta CAUX1; sta CAUX2 */
 
         /* Disk 1 is ASCII '1' = 0x31 etc */
         /* Disk 1 -> unit = 0 */
@@ -1452,6 +1479,37 @@ void SIO_PutByte(int byte)
 int SIO_GetByte(void)
 {
     int byte = 0;
+
+#ifdef USE_FUJINET
+    /* Check if FujiNet is enabled and expecting data */
+    if (fujinet_enabled && TransferStatus == SIO_DataSend) {
+        uint8_t fuji_byte;
+        int fuji_result = FujiNet_GetByte(&fuji_byte);
+
+        if (fuji_result == 1) { /* Data byte received */
+#ifdef DEBUG_FUJINET
+            Log_print("SIO_GetByte: Processing FujiNet send for device 0x%02X, command 0x%02X, TransferStatus=SIO_DataSend", 
+                      CommandFrame[0], CommandFrame[1]);
+#endif
+            FUJINET_DEBUG_LOG("SIO_GetByte: Processing FujiNet send for device 0x%02X, command 0x%02X", 
+                             CommandFrame[0], CommandFrame[1]);
+            FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet returned data byte 0x%02X", fuji_byte);
+            /* Schedule IRQ for next byte if needed by protocol? - Check FujiNet_GetByte */
+            /* POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; */
+            return fuji_byte;
+        } else if (fuji_result == -1) { /* Final status byte received */
+            FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet returned status byte 0x%02X", fuji_byte);
+            TransferStatus = SIO_NoFrame; /* Transfer complete */
+            CommandIndex = 0;
+            return fuji_byte;
+        } else { /* Error or timeout from FujiNet_GetByte */
+            FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet returned 0 (error/timeout), setting SIO_Error");
+            TransferStatus = SIO_NoFrame; /* Transfer failed */
+            CommandIndex = 0;
+            return SIO_NAK;
+        }
+    }
+#endif /* USE_FUJINET */
 
     switch (TransferStatus) {
     case SIO_StatusRead:
