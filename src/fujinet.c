@@ -107,7 +107,7 @@ static uint32_t from_little_endian(uint32_t value) {
 static int send_altirra_message(uint8_t event, uint8_t arg, const uint8_t *data, int data_len) {
     uint8_t *message;
     uint32_t total_length;
-    uint32_t timestamp;
+    uint32_t length_le, timestamp_le = 0;
     int sent_ok;
     
     /* Calculate total message length (header + payload) */
@@ -123,16 +123,17 @@ static int send_altirra_message(uint8_t event, uint8_t arg, const uint8_t *data,
         return 0;
     }
     
-    /* Set the message length in little-endian format */
-    *((uint32_t *)message) = to_little_endian(total_length);
+    /* Convert the 32-bit values to little-endian format */
+    length_le = to_little_endian(total_length);
+    timestamp_le = 0; /* We use 0 for timestamp */
     
-    /* Set timestamp (we use 0) */
-    timestamp = 0;
-    *((uint32_t *)(message + 4)) = to_little_endian(timestamp);
+    /* Copy the header byte-by-byte to ensure correct format */
+    memcpy(message, &length_le, 4);       /* Total length (4 bytes) */
+    memcpy(message + 4, &timestamp_le, 4); /* Timestamp (4 bytes) */
     
     /* Set event type and device ID */
-    message[8] = event;
-    message[9] = arg;
+    message[8] = event;  /* Event byte */
+    message[9] = arg;    /* Arg byte (usually device ID) */
     
     /* Copy data (if any) */
     if (data != NULL && data_len > 0) {
@@ -247,32 +248,51 @@ static int receive_altirra_message(uint8_t expected_event, uint8_t *event, uint8
     return result;
 }
 
-/* Helper function to send data over TCP */
+/* Helper function to send data over TCP, ensuring all bytes are sent */
 static int send_tcp_data(const uint8_t *data, int data_len) {
+    int total_sent = 0;
     int sent;
     
-    if (!fujinet_enabled || tcp_socket == INVALID_SOCKET) {
+    if (tcp_socket == INVALID_SOCKET) { 
         return 0;
     }
     
-    sent = send(tcp_socket, (const char *)data, data_len, 0);
-    if (sent == SOCKET_ERROR) {
-        Log_print("FujiNet: Send failed: %s", strerror(errno));
-        return 0;
+    while (total_sent < data_len) {
+        sent = send(tcp_socket, (const char *)(data + total_sent), data_len - total_sent, 0);
+        if (sent == SOCKET_ERROR) {
+#ifdef HAVE_SOCKET
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* Interrupted or temporary error, try again */
+                continue; 
+            }
+#else /* Windows */
+            int wsa_error = WSAGetLastError();
+            if (wsa_error == WSAEINTR || wsa_error == WSAEWOULDBLOCK) {
+                /* Interrupted or temporary error, try again */
+                continue;
+            }
+#endif
+            /* Other error */
+            Log_print("FujiNet: Send failed: %s", strerror(errno));
+            return 0; /* Failure */
+        }
+        if (sent == 0) {
+             /* Socket closed unexpectedly? */
+             Log_print("FujiNet: Send returned 0, connection closed?");
+             return 0; /* Failure */
+        }
+        total_sent += sent;
     }
     
-    if (sent != data_len) {
-        Log_print("FujiNet: Sent only %d of %d bytes", sent, data_len);
-    }
-    
-    return 1;
+    /* All bytes sent successfully */
+    return 1; 
 }
 
 /* Helper function to receive data over TCP */
 static int receive_tcp_data(uint8_t *buffer, int buffer_size, int *received_len) {
     int received;
     
-    if (!fujinet_enabled || tcp_socket == INVALID_SOCKET) {
+    if (tcp_socket == INVALID_SOCKET) { 
         return 0;
     }
     
@@ -313,8 +333,6 @@ int FujiNet_Initialise(const char *host_port) {
     struct sockaddr_in server;
     struct hostent *he;
     struct timeval tv;
-    uint8_t event, arg;
-    int ack_len = 0;
     int result;
     char *host_port_copy;
     char *port_str;
@@ -436,31 +454,9 @@ int FujiNet_Initialise(const char *host_port) {
     
     Log_print("FujiNet: Connected to NetSIO hub");
     
-    /* Send Altirra CONNECTED event */
-    if (!send_altirra_message(EVENT_CONNECTED, 0, NULL, 0)) {
-        Log_print("FujiNet: Failed to send CONNECTED message");
-        closesocket(tcp_socket);
-        tcp_socket = INVALID_SOCKET;
-#ifndef HAVE_SOCKET
-        WSACleanup();
-#endif
-        return 0;
-    }
+    fujinet_enabled = 1; /* Set enabled directly after connect */
     
-    /* Wait for ACK response */
-    if (!receive_altirra_message(EVENT_ACK, &event, &arg, NULL, 0, &ack_len)) {
-        Log_print("FujiNet: Did not receive ACK for connection");
-        closesocket(tcp_socket);
-        tcp_socket = INVALID_SOCKET;
-#ifndef HAVE_SOCKET
-        WSACleanup();
-#endif
-        return 0;
-    }
-     
-    fujinet_enabled = 1;
-    
-    Log_print("FujiNet: Device initialized successfully");
+    Log_print("FujiNet: Device initialized successfully (assuming connection implies readiness)");
     return 1;
 }
 
