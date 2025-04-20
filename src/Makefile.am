@@ -86,6 +86,9 @@ atari800_SOURCES = \
 	roms/altirra_5200_charset.c \
 	rtime.c rtime.h \
 	sio.c sio.h \
+	sio_state.c sio_state.h \
+	sio_handler.c sio_handler.h \
+	fujinet_sio_handler.c fujinet_sio_handler.h \
 	sysrom.c sysrom.h \
 	util.c util.h
 atari800_LDADD =
