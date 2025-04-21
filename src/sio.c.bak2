@@ -220,125 +220,6 @@ static int command_frame_counter = 0;
 int SIO_Initialise(int *argc, char *argv[])
 {
 	int i;
-	int j;
-
-	for (i = j = 1; i < *argc; i++) {
-		if (strcmp(argv[i], "-d1") == 0) {
-			if (i + 1 >= *argc) {
-				Log_print("Missing filename for -d1");
-				return FALSE;
-			}
-			if (!SIO_Mount(1, argv[i + 1], FALSE)) {
-				Log_print("Error mounting disk 1: %s", argv[i + 1]);
-				return FALSE;
-			}
-			i++;
-		}
-		else if (strcmp(argv[i], "-d2") == 0) {
-			if (i + 1 >= *argc) {
-				Log_print("Missing filename for -d2");
-				return FALSE;
-			}
-			if (!SIO_Mount(2, argv[i + 1], FALSE)) {
-				Log_print("Error mounting disk 2: %s", argv[i + 1]);
-				return FALSE;
-			}
-			i++;
-		}
-		else if (strcmp(argv[i], "-d3") == 0) {
-			if (i + 1 >= *argc) {
-				Log_print("Missing filename for -d3");
-				return FALSE;
-			}
-			if (!SIO_Mount(3, argv[i + 1], FALSE)) {
-				Log_print("Error mounting disk 3: %s", argv[i + 1]);
-				return FALSE;
-			}
-			i++;
-		}
-		else if (strcmp(argv[i], "-d4") == 0) {
-			if (i + 1 >= *argc) {
-				Log_print("Missing filename for -d4");
-				return FALSE;
-			}
-			if (!SIO_Mount(4, argv[i + 1], FALSE)) {
-				Log_print("Error mounting disk 4: %s", argv[i + 1]);
-				return FALSE;
-			}
-			i++;
-		}
-		else if (strcmp(argv[i], "-d5") == 0) {
-			if (i + 1 >= *argc) {
-				Log_print("Missing filename for -d5");
-				return FALSE;
-			}
-			if (!SIO_Mount(5, argv[i + 1], FALSE)) {
-				Log_print("Error mounting disk 5: %s", argv[i + 1]);
-				return FALSE;
-			}
-			i++;
-		}
-		else if (strcmp(argv[i], "-d6") == 0) {
-			if (i + 1 >= *argc) {
-				Log_print("Missing filename for -d6");
-				return FALSE;
-			}
-			if (!SIO_Mount(6, argv[i + 1], FALSE)) {
-				Log_print("Error mounting disk 6: %s", argv[i + 1]);
-				return FALSE;
-			}
-			i++;
-		}
-		else if (strcmp(argv[i], "-d7") == 0) {
-			if (i + 1 >= *argc) {
-				Log_print("Missing filename for -d7");
-				return FALSE;
-			}
-			if (!SIO_Mount(7, argv[i + 1], FALSE)) {
-				Log_print("Error mounting disk 7: %s", argv[i + 1]);
-				return FALSE;
-			}
-			i++;
-		}
-		else if (strcmp(argv[i], "-d8") == 0) {
-			if (i + 1 >= *argc) {
-				Log_print("Missing filename for -d8");
-				return FALSE;
-			}
-			if (!SIO_Mount(8, argv[i + 1], FALSE)) {
-				Log_print("Error mounting disk 8: %s", argv[i + 1]);
-				return FALSE;
-			}
-			i++;
-		}
-		else if (strcmp(argv[i], "-d") == 0) {
-			if (i + 1 >= *argc) {
-				Log_print("Missing filename for -d");
-				return FALSE;
-			}
-			if (!SIO_Mount(1, argv[i + 1], FALSE)) {
-				Log_print("Error mounting disk 1: %s", argv[i + 1]);
-				return FALSE;
-			}
-			i++;
-		}
-		else if (strcmp(argv[i], "-i") == 0) {
-			ignore_header_writeprotect = TRUE;
-		}
-		else if (strcmp(argv[i], "-h") == 0) {
-			printf("Usage: %s [-d1|-d2|-d3|-d4|-d5|-d6|-d7|-d8|-d] <filename> [-i]\n", argv[0]);
-			printf("       %s [-h]\n", argv[0]);
-			printf("  -d1|-d2|-d3|-d4|-d5|-d6|-d7|-d8  Mount disk image in drive 1-8\n");
-			printf("  -d                            Mount disk image in drive 1\n");
-			printf("  -i                            Ignore write protect bit in ATR header\n");
-			printf("  -h                            Print this help message\n");
-			return FALSE;
-		}
-		else {
-			j = i;
-		}
-	}
-
 	for (i = 0; i < 8; i++) {
 		strcpy(SIO_filename[i], "Off");
 		SIO_drive_status[i] = SIO_OFF;
@@ -355,33 +236,12 @@ int SIO_Initialise(int *argc, char *argv[])
 	if (FujiNet_Initialise(NULL)) {
 		printf("***** FUJINET INITIALIZED SUCCESSFULLY *****\n");
 		fflush(stdout);
-		FUJINET_DEBUG_LOG("FujiNet: Initialized successfully");
+		Log_print("FujiNet: Initialized successfully");
 		
-		/* Initialize our state machine for SIO operations */
+		/* Initialize our new state machine and handlers */
 		SIO_State_Init();
-		FUJINET_DEBUG_LOG("SIO State Machine: Initialized");
-		
-		/* Initialize SIO handler module */
 		SIO_Handler_Init();
-		FUJINET_DEBUG_LOG("SIO Handler: Initialized");
-		
-		/* Initialize the FujiNet SIO handler for processing commands */
 		FujiNet_SIO_Handler_Init();
-		FUJINET_DEBUG_LOG("FujiNet SIO Handler: Initialized");
-		
-		/* Debug information about the FujiNet and disk configuration */
-		FUJINET_DEBUG_LOG("***** CURRENT DEVICE CONFIGURATION *****");
-		FUJINET_DEBUG_LOG("FujiNet enabled: %d", fujinet_enabled);
-		
-		/* Log status of disk drives */
-		FUJINET_DEBUG_LOG("Disk drives status:");
-		for (i = 0; i < 8; i++) {
-			FUJINET_DEBUG_LOG("Drive %d (device ID: 0x%02X): %s", 
-				i + 1, 0x31 + i, 
-				SIO_drive_status[i] == SIO_OFF ? "OFF" : 
-				SIO_drive_status[i] == SIO_NO_DISK ? "NO DISK" : 
-				SIO_drive_status[i] == SIO_READ_ONLY ? "READ ONLY" : "READ/WRITE");
-		}
 		
 #ifdef DEBUG_FUJINET
 		printf("***** FUJINET DEBUG OUTPUT ENABLED *****\n");
@@ -390,11 +250,11 @@ int SIO_Initialise(int *argc, char *argv[])
 	else {
 		printf("***** FUJINET INITIALIZATION FAILED *****\n");
 		fflush(stdout);
-		FUJINET_DEBUG_LOG("FujiNet: Initialization failed");
+		Log_print("FujiNet: Initialization failed");
 	}
 	printf("***** FUJINET INITIALIZATION COMPLETE *****\n\n");
 	fflush(stdout);
-#endif /* USE_FUJINET */
+#endif
 
 	return TRUE;
 }
@@ -1123,7 +983,7 @@ static int Command_Frame(UBYTE *data_buffer)
         return SIO_ERROR; /* Indicate error */
     }
 
-    FUJINET_DEBUG_LOG("SIO: Processing Command Frame via FujiNet: %02X %02X %02X %02X %02X",
+    Log_print("SIO: Processing Command Frame via FujiNet: %02X %02X %02X %02X %02X",
               data_buffer[0], data_buffer[1], data_buffer[2], data_buffer[3], data_buffer[4]);
 
     /* --- Call FujiNet to process the command --- */
@@ -1136,7 +996,7 @@ static int Command_Frame(UBYTE *data_buffer)
     );
     /* --- End FujiNet Call --- */
 
-    FUJINET_DEBUG_LOG("SIO_Handler: FujiNet_ProcessCommand returned %d", fujinet_response_byte);
+    Log_print("SIO_Handler: FujiNet_ProcessCommand returned %d", fujinet_response_byte);
     
     UBYTE sio_response;
     /* Map FujiNet result to SIO protocol response */
@@ -1165,14 +1025,14 @@ static int Command_Frame(UBYTE *data_buffer)
     /* If the command was acknowledged (device will send data),
      * set state for data transfer. Otherwise, reset SIO state. */
     if (sio_response == SIO_ACK) {
-        FUJINET_DEBUG_LOG("SIO_Handler: FujiNet command ACKed (returned SIO_ACK 0x%02X), proceeding to data phase.", sio_response);
+        Log_print("SIO_Handler: FujiNet command ACKed (returned SIO_ACK 0x%02X), proceeding to data phase.", sio_response);
         /* Set TransferStatus to indicate data transfer FROM device TO OS is expected */
         TransferStatus = SIO_DataSend;
         CommandIndex = 0; /* Reset CommandIndex for data phase */
         ExpectedBytes = FujiNet_SIO_GetResponseBufferSize(); /* Set expected bytes for SIO_GetByte */
         POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; /* Schedule the IRQ to tell the OS the first byte is ready */
     } else {
-        FUJINET_DEBUG_LOG("SIO_Handler: FujiNet command NOT ACKed (returned 0x%02X), resetting SIO state.", sio_response);
+        Log_print("SIO_Handler: FujiNet command NOT ACKed (returned 0x%02X), resetting SIO state.", sio_response);
         TransferStatus = SIO_NoFrame;
         CommandIndex = 0; /* Reset index for next command */
         ExpectedBytes = 0; // Reset ExpectedBytes
@@ -1189,7 +1049,7 @@ static int Command_Frame(UBYTE *data_buffer)
 
  	(void)timeout; /* Suppress unused variable warning */
 
- 	FUJINET_DEBUG_LOG("SIO: Command_Frame received Device ID: 0x%02X", data_buffer[0]);
+ 	Log_print("SIO: Command_Frame received Device ID: 0x%02X", data_buffer[0]);
 
  	/* Check device ID */
  #ifdef USE_FUJINET
@@ -1301,116 +1161,256 @@ static int last_ypos = 0;
 /* SIO patch emulation routine */
 void SIO_Handler(void)
 {
-	UBYTE data_buffer[256];
-	int sector;
-	int realsize;
-
-	/* Get command info from OS 0x300 page */
-	UBYTE sio_devic = MEMORY_dGetByte(0x300); /* Device ID */
-	UBYTE sio_unit = MEMORY_dGetByte(0x301); /* Unit number */
-	UBYTE cmd = MEMORY_dGetByte(0x302);      /* Command */
-	UWORD data_addr = MEMORY_dGetWordAligned(0x304); /* Data buffer address */
-	UWORD data_len = MEMORY_dGetWordAligned(0x308);  /* Data length */
+	FUJINET_DEBUG_LOG("SIO_Handler: Entered. Current TransferStatus = %d", TransferStatus);
+	UBYTE sio_devic = MEMORY_dGetByte(0x300);
+	UBYTE sio_unit = MEMORY_dGetByte(0x301);
+	UBYTE cmd = MEMORY_dGetByte(0x302);
+	UWORD data = MEMORY_dGetWordAligned(0x304);
+	int length = MEMORY_dGetWordAligned(0x308);
 	UBYTE sio_aux1 = MEMORY_dGetByte(0x30a); /* Low byte of sector/aux */
 	UBYTE sio_aux2 = MEMORY_dGetByte(0x30b); /* High byte of sector/aux */
 
-	FUJINET_DEBUG_LOG("SIO_Handler: Dev=0x%02X Unit=0x%02X Cmd=0x%02X Aux1=0x%02X Aux2=0x%02X Data=0x%04X Len=%d",
-					  sio_devic, sio_unit, cmd, sio_aux1, sio_aux2, data_addr, data_len);
+	Log_print("SIO_Handler: Dev=0x%02X Unit=0x%02X Cmd=0x%02X Aux1=0x%02X Aux2=0x%02X Buf=0x%04X Len=%d",
+				  sio_devic, sio_unit, cmd, sio_aux1, sio_aux2, data, length);
 
 #ifdef USE_FUJINET
-	/* When FujiNet is enabled, route all SIO commands to the NetSIO hub */
-	if (fujinet_enabled) {
+	FUJINET_DEBUG_LOG("SIO_Handler: Pre-check state: TransferStatus=%d, sio_devic=0x%02X, fujinet_enabled=%d",
+					  TransferStatus, sio_devic, fujinet_enabled);
+
+	/* Use our new state machine only for FujiNet devices or disk devices when FujiNet is enabled */
+	if (fujinet_enabled && (sio_devic == 0x70 || (sio_devic >= 0x31 && sio_devic <= 0x38))) {
 		/* Create command frame from memory values */
-		UBYTE command_frame[5];
-		command_frame[0] = sio_devic;     /* Device ID */
-		command_frame[1] = cmd;           /* Command */
-		command_frame[2] = sio_aux1;      /* Aux1 */
-		command_frame[3] = sio_aux2;      /* Aux2 */
-		command_frame[4] = SIO_ChkSum(command_frame, 4); /* Calculate correct checksum */
-		
-		FUJINET_DEBUG_LOG("SIO_Handler: Routing command to NetSIO hub - Device=0x%02X, Command=0x%02X, Aux1=0x%02X, Aux2=0x%02X",
-						 sio_devic, cmd, sio_aux1, sio_aux2);
-						 
-		/* Process the command through our handler */
 		SIO_Command_Frame cmd_frame;
-		cmd_frame.device_id = command_frame[0];
-		cmd_frame.command = command_frame[1];
-		cmd_frame.aux1 = command_frame[2];
-		cmd_frame.aux2 = command_frame[3];
-		cmd_frame.checksum = command_frame[4];
-		
-		/* Get data buffer pointer from Atari memory if applicable */
-		UBYTE *data_buffer_ptr = NULL;
-		if (data_len > 0 && data_addr != 0) {
-			data_buffer_ptr = &MEMORY_mem[data_addr];
+		cmd_frame.device_id = sio_devic;
+		cmd_frame.command = cmd;
+		cmd_frame.aux1 = sio_aux1;
+		cmd_frame.aux2 = sio_aux2;
+		cmd_frame.checksum = SIO_ChkSum((UBYTE*)&cmd_frame, 4); /* First 4 bytes */
+
+		/* Get data buffer pointer from Atari memory */
+		UBYTE *data_buffer = NULL;
+		if (length > 0 && data != 0) {
+			data_buffer = &MEMORY_mem[data];
 		}
-		
-		/* Process the command using our handler */
-		SIO_Handler_Process_Command(&cmd_frame, data_buffer_ptr, data_len);
+
+		/* Process the command using our refactored handler */
+		FUJINET_DEBUG_LOG("SIO_Handler: Using refactored SIO handler for device 0x%02X", sio_devic);
+		SIO_Handler_Process_Command(&cmd_frame, data_buffer, length);
 		
 		/* Copy CPU registers back to ensure compatibility with existing code */
-		MEMORY_dPutByte(0x023a, sio_devic); /* CDEVIC */
-		MEMORY_dPutByte(0x023b, cmd);      /* CCOMND */
-		MEMORY_dPutByte(0x023c, sio_aux1); /* CAUX1 */
-		MEMORY_dPutByte(0x023d, sio_aux2); /* CAUX2 */
+		MEMORY_dPutByte(0x023a, sio_devic + sio_unit + 0xff); /* CDEVIC */
+		MEMORY_dPutByte(0x023b, cmd); /* CCOMND */
+		MEMORY_dPutByte(0x023c, (sio_aux2 << 8) + sio_aux1); /* CAUX1; CAUX2 */
 		
-		FUJINET_DEBUG_LOG("SIO_Handler: Command processing complete");
-		return;
+		return; /* Our handler processed the command, skip original code */
 	}
 #endif
+		/* Original SIO Handling starts here */
+		UBYTE unit;
+		int realsize;
+		UBYTE result = 'N';
+		unit = sio_devic + sio_unit + 0xff;
 
-	/* Original SIO Handler code (unchanged) */
-	UBYTE unit;
-	UBYTE result = 'N';
+		if ((unsigned int)sio_devic + (unsigned int)sio_unit > 0xff) {
+			/* carry */
+			unit++;
+		}
+		/* A real atari just adds the bytes and 0xff. The result could wrap.*/
+		/* XL OS: E99D: LDA $0300 ADC $0301 ADC #$FF STA 023A */
 
-	unit = sio_devic + sio_unit - 1;
+		/* The OS SIO routine copies decide ID do CDEVIC, command ID to CCOMND etc.
+		   This operation is not needed with the SIO patch enabled, but we perform
+		   it anyway, since some programs rely on that. (E.g. the E.T Phone Home!
+		   cartridge would crash with SIO patch enabled.)
+		   Note: While on a real XL OS the copying is done only for SIO devices
+		   (not for PBI ones), here we copy the values for all types of devices -
+		   it's probably harmless. */
+		MEMORY_dPutByte(0x023a, unit); /* sta CDEVIC */
+		MEMORY_dPutByte(0x023b, cmd); /* sta CCOMND */
+		MEMORY_dPutByte(0x023c, (sio_aux2 << 8) + sio_aux1); /* sta CAUX1; sta CAUX2 */
 
-	/* The OS SIO routine copies device ID to CDEVIC, command ID to CCOMND etc. */
-	MEMORY_dPutByte(0x023a, unit); /* sta CDEVIC */
-	MEMORY_dPutByte(0x023b, cmd); /* sta CCOMND */
-	MEMORY_dPutByte(0x023c, (sio_aux2 << 8) + sio_aux1); /* sta CAUX1; sta CAUX2 */
+		/* Disk 1 is ASCII '1' = 0x31 etc */
+		/* Disk 1 -> unit = 0 */
+		unit -= 0x31;
 
-	/* Disk 1 is ASCII '1' = 0x31 etc */
-	/* Disk 1 -> unit = 0 */
-	unit = sio_unit - '1';
+		if (MEMORY_dGetByte(0x300) != 0x60 && unit < 8 && (SIO_drive_status[unit] != SIO_OFF || BINLOAD_start_binloading)) {    /* UBYTE range ! */
 
-	/* Process disk commands */
-	if (sio_devic != 0x60 && unit < 8 && (SIO_drive_status[unit] != SIO_OFF || BINLOAD_start_binloading)) {
-		/* ... original disk command handling ... */
-	}
-	/* Process cassette commands */
-	else if (sio_devic == 0x60) {
-		/* ... original cassette command handling ... */
-	}
+# ifdef DEBUG
+    Log_print("SIO disk command is %02x %02x %02x %02x %02x   %02x %02x %02x %02x %02x %02x",
+            cmd, MEMORY_dGetByte(0x303), MEMORY_dGetByte(0x304), MEMORY_dGetByte(0x305), MEMORY_dGetByte(0x306),
+            MEMORY_dGetByte(0x308), MEMORY_dGetByte(0x309), MEMORY_dGetByte(0x30a), MEMORY_dGetByte(0x30b),
+            MEMORY_dGetByte(0x30c), MEMORY_dGetByte(0x30d));
 
-	/* Process CPU registers based on result */
-	switch (result) {
-	case 0x00:                    /* Device disabled, generate timeout */
-		CPU_regY = 138; /* TIMOUT: peripheral device timeout error */
-		CPU_SetN;
-		break;
-	case 'A':                    /* Device acknowledge */
-	case 'C':                    /* Operation complete */
-		CPU_regY = 1; /* SUCCES: successful operation */
-		CPU_ClrN;
-		break;
-	case 'N':                    /* Device NAK */
-		CPU_regY = 139; /* DNACK: device does not acknowledge command error */
-		CPU_SetN;
-		break;
-	case 'E':                    /* Device error */
-		CPU_regY = 144; /* DERROR: device done (operation incomplete) error */
-		CPU_SetN;
-		break;
-	default:
-		CPU_regY = 146; /* FNCNOT: function not implemented in handler error */
-		CPU_SetN;
-		break;
-	}
-	CPU_regA = 0;
-	MEMORY_dPutByte(0x0303, CPU_regY);
-	MEMORY_dPutByte(0x42,0);
-	CPU_SetC;
+# endif
+		switch (cmd) {
+            case 0x4e:                /* Read Status Block */
+                if (12 == length) {
+                    result = SIO_ReadStatusBlock(unit, DataBuffer);
+                    if (result == 'C')
+                        MEMORY_CopyToMem(DataBuffer, data, 12);
+                }
+                else
+                    result = 'E';
+                break;
+            case 0x4f:                /* Write Status Block */
+                if (12 == length) {
+                    MEMORY_CopyFromMem(data, DataBuffer, 12);
+                    result = SIO_WriteStatusBlock(unit, DataBuffer);
+                }
+                else
+                    result = 'E';
+                break;
+            case 0x50:                /* Write */
+            case 0x57:
+            case 0xD0:                /* xf551 hispeed */
+            case 0xD7:
+                SIO_SizeOfSector((UBYTE)unit, (sio_aux2 << 8) + sio_aux1, &realsize, NULL);
+                if (realsize == length) {
+                    MEMORY_CopyFromMem(data, DataBuffer, realsize);
+                    result = SIO_WriteSector(unit, (sio_aux2 << 8) + sio_aux1, DataBuffer);
+                }
+                else
+                    result = 'E';
+                break;
+            case 0x52:                /* Read */
+            case 0xD2:                /* xf551 hispeed */
+
+# ifndef NO_SECTOR_DELAY
+    if ((sio_aux2 << 8) + sio_aux1 == 1) {
+                if (delay_counter > 0) {
+                    if (last_ypos != ANTIC_ypos) {
+                        last_ypos = ANTIC_ypos;
+                        delay_counter--;
+                    }
+                    CPU_regPC = 0xe459;    /* stay at SIO patch */
+                    return;
+                }
+                delay_counter = SECTOR_DELAY;
+            }
+            else {
+                delay_counter = 0;
+            }
+# endif
+    SIO_SizeOfSector((UBYTE)unit, (sio_aux2 << 8) + sio_aux1, &realsize, NULL);
+                if (realsize == length) {
+                    result = SIO_ReadSector(unit, (sio_aux2 << 8) + sio_aux1, DataBuffer);
+                    if (result == 'C')
+                        MEMORY_CopyToMem(DataBuffer, data, realsize);
+                }
+                else
+                    result = 'E';
+                break;
+            case 0x53:                /* Status */
+            case 0xD3:                /* xf551 hispeed */
+                if (4 == length) {
+                    result = SIO_DriveStatus(unit, DataBuffer);
+                    if (result == 'C') {
+                        MEMORY_CopyToMem(DataBuffer, data, 4);
+                    }
+                }
+                else
+                    result = 'E';
+                break;
+            /*case 0x66:*/            /* US Doubler Format - I think! */
+            case 0x21:                /* Format Disk */
+            case 0xA1:                /* xf551 hispeed */
+                realsize = SIO_format_sectorsize[unit];
+                if (realsize == length) {
+                    result = SIO_FormatDisk(unit, DataBuffer, realsize, SIO_format_sectorcount[unit]);
+                    if (result == 'C')
+                        MEMORY_CopyToMem(DataBuffer, data, realsize);
+                }
+                else {
+                    /* there are programs which send the format-command but don't wait for the result (eg xf-tools) */
+                    SIO_FormatDisk(unit, DataBuffer, realsize, SIO_format_sectorcount[unit]);
+                    result = 'E';
+                }
+                break;
+            case 0x22:                /* Enhanced Density Format */
+            case 0xA2:                /* xf551 hispeed */
+                realsize = 128;
+                if (realsize == length) {
+                    result = SIO_FormatDisk(unit, DataBuffer, 128, 1040);
+                    if (result == 'C')
+                        MEMORY_CopyToMem(DataBuffer, data, realsize);
+                }
+                else {
+                    SIO_FormatDisk(unit, DataBuffer, 128, 1040);
+                    result = 'E';
+                }
+                break;
+            default:
+                result = 'N';
+        }
+        }
+        /* cassette i/o */
+        else if (MEMORY_dGetByte(0x300) == 0x60) {
+            UBYTE gaps = MEMORY_dGetByte(0x30b);
+            switch (cmd){
+            case 0x52:    /* read */
+                /* set expected Gap */
+                CASSETTE_AddGap(gaps == 0 ? 2000 : 160);
+                /* get record from storage medium */
+                if (CASSETTE_ReadToMemory(data, length))
+                    result = 'C';
+                else
+                    result = 'E';
+                break;
+            case 0x50:    /* put (used by AltirraOS) */
+            case 0x57:    /* write (used by Atari OS) */
+                /* add pregap length */
+                CASSETTE_AddGap(gaps == 0 ? 3000 : 260);
+                /* write full record to storage medium */
+                if (CASSETTE_WriteFromMemory(data, length))
+                    result = 'C';
+                else
+                    result = 'E';
+                break;
+            default:
+                result = 'N';
+            }
+        }
+
+        switch (result) {
+        case 0x00:                    /* Device disabled, generate timeout */
+            CPU_regY = 138; /* TIMOUT: peripheral device timeout error */
+            CPU_SetN;
+            break;
+        case 'A':                    /* Device acknowledge */
+        case 'C':                    /* Operation complete */
+            CPU_regY = 1; /* SUCCES: successful operation */
+            CPU_ClrN;
+            break;
+        case 'N':                    /* Device NAK */
+            CPU_regY = 139; /* DNACK: device does not acknowledge command error */
+            CPU_SetN;
+            break;
+        case 'E':                    /* Device error */
+            CPU_regY = 144; /* DERROR: device done (operation incomplete) error */
+            CPU_SetN;
+            break;
+        default:
+            CPU_regY = 146; /* FNCNOT: function not implemented in handler error */
+            CPU_SetN;
+            break;
+        }
+        CPU_regA = 0;    /* MMM */
+        MEMORY_dPutByte(0x0303, CPU_regY);
+        MEMORY_dPutByte(0x42,0);
+        CPU_SetC;
+
+        /* After each SIO operation a routine called SENDDS ($EC5F in OSB) is
+           invoked, which, among other functions, silences the sound
+           generators. With SIO patch we don't call SIOV and in effect SENDDS
+           is not called either, but this causes a problem with tape saving.
+           During tape saving sound generators are enabled before calling
+           SIOV, but are not disabled later (no call to SENDDS). The effect is
+           that after saving to tape the unwanted SIO sounds are left audible.
+           To avoid the problem, we silence the sound registers by hand. */
+        POKEY_PutByte(POKEY_OFFSET_AUDC1, 0);
+        POKEY_PutByte(POKEY_OFFSET_AUDC2, 0);
+        POKEY_PutByte(POKEY_OFFSET_AUDC3, 0);
+        POKEY_PutByte(POKEY_OFFSET_AUDC4, 0);
 }
 
  UBYTE SIO_ChkSum(const UBYTE *buffer, int length)
@@ -1467,20 +1467,69 @@ void SIO_PutByte(int byte)
 	fflush(stdout);
 
 #ifdef USE_FUJINET
+	/* Counter for tracking command frames */
+	static int command_frame_counter = 0;
+
 	/* More verbose logging about the current state and device detection */
 	FUJINET_DEBUG_LOG("SIO_PutByte: Entry - byte=0x%02X, TransferStatus=%d, CommandIndex=%d, ExpectedBytes=%d, fujinet_enabled=%d",
 	                 byte, TransferStatus, CommandIndex, ExpectedBytes, fujinet_enabled);
 
-	/* When FujiNet is enabled, route all SIO traffic to the NetSIO hub */
+	/* Use our new refactored SIO handler if FujiNet is enabled and 
+	   we're dealing with the FujiNet device or disk devices */
 	if (fujinet_enabled) {
-		FUJINET_DEBUG_LOG("SIO_PutByte: FujiNet enabled, routing byte 0x%02X to refactored handler (state=%d)", 
-		                  byte, TransferStatus);
-		SIO_Handler_Put_Byte(byte);
-		return;
+		/* Only use refactored handler for FujiNet device or disk devices when in the appropriate state */
+		if (TransferStatus == SIO_CommandFrame) {
+			FUJINET_DEBUG_LOG("SIO_PutByte: In SIO_CommandFrame state with CommandIndex=%d", CommandIndex);
+			
+			/* Check if we already collected some command bytes */
+			if (CommandIndex > 0) {
+				/* Copy previously received bytes to our command buffer if needed */
+				if (CommandIndex == 1) {
+					/* This is the second byte of the command frame, first was device ID */
+					UBYTE device_id = CommandFrame[0];
+					
+					FUJINET_DEBUG_LOG("SIO_PutByte: Command frame byte 1 (device_id=0x%02X) - checking if FujiNet (0x70) or disk (0x31-0x38)", device_id);
+					
+					/* Only use refactored handler for FujiNet or disk devices */
+					if (device_id == 0x70 || (device_id >= 0x31 && device_id <= 0x38)) {
+						FUJINET_DEBUG_LOG("SIO_PutByte: Using refactored SIO handler for device 0x%02X (byte=%02X)", 
+										 device_id, byte);
+						SIO_Handler_Put_Byte(byte);
+						return;
+					} else {
+						FUJINET_DEBUG_LOG("SIO_PutByte: Device 0x%02X is not FujiNet or disk, using original handler", device_id);
+					}
+				} else {
+					/* Already have multiple bytes, check first byte to see if we should use our handler */
+					UBYTE device_id = CommandFrame[0];
+					
+					FUJINET_DEBUG_LOG("SIO_PutByte: Command frame byte %d (device_id=0x%02X) - checking if FujiNet (0x70) or disk (0x31-0x38)", 
+								   CommandIndex, device_id);
+					
+					if (device_id == 0x70 || (device_id >= 0x31 && device_id <= 0x38)) {
+						FUJINET_DEBUG_LOG("SIO_PutByte: Using refactored SIO handler for device 0x%02X (byte=%02X)", 
+										 device_id, byte);
+						SIO_Handler_Put_Byte(byte);
+						return;
+					} else {
+						FUJINET_DEBUG_LOG("SIO_PutByte: Device 0x%02X is not FujiNet or disk, using original handler", device_id);
+					}
+				}
+			} else if (byte == 0x70 || (byte >= 0x31 && byte <= 0x38)) {
+				/* This is the first byte of the command frame and it's a FujiNet or disk device */
+				FUJINET_DEBUG_LOG("SIO_PutByte: First command byte 0x%02X is FujiNet or disk, using refactored handler", byte);
+				SIO_Handler_Put_Byte(byte);
+				return;
+			} else {
+				FUJINET_DEBUG_LOG("SIO_PutByte: First command byte 0x%02X is not FujiNet or disk, using original handler", byte);
+			}
+		} else {
+			FUJINET_DEBUG_LOG("SIO_PutByte: Not in SIO_CommandFrame state (state=%d), using original handler", TransferStatus);
+		}
 	}
 	
-	/* Log debugging information when using original handler */
-	FUJINET_DEBUG_LOG("SIO_PutByte: Using original handler (byte=0x%02X, state=%d) - FujiNet disabled",
+	/* Log debugging information */
+	FUJINET_DEBUG_LOG("SIO_PutByte: Using original handler (byte=0x%02X, state=%d)",
                      byte, TransferStatus);
 #endif /* USE_FUJINET */
 
@@ -1489,26 +1538,18 @@ void SIO_PutByte(int byte)
 		if (CommandIndex < ExpectedBytes) {
 			CommandFrame[CommandIndex++] = byte;
 			if (CommandIndex >= ExpectedBytes) {
-#ifdef USE_FUJINET
-				/* Command frame complete, print summary and increment counter regardless of device */
-				command_frame_counter++;
-				FUJINET_DEBUG_LOG("SIO_PutByte: COMMAND FRAME #%d COMPLETE: Device=0x%02X, Command=0x%02X, Aux1=0x%02X, Aux2=0x%02X, Checksum=0x%02X",
-					command_frame_counter, CommandFrame[0], CommandFrame[1], CommandFrame[2], CommandFrame[3], CommandFrame[4]);
-#endif
 				if ((CommandFrame[0] >= 0x31 && CommandFrame[0] <= 0x38 && (SIO_drive_status[CommandFrame[0]-0x31] != SIO_OFF || BINLOAD_start_binloading))) {
-#ifdef USE_FUJINET
-					// Also allow disk drives (0x31-0x38) to be valid when FujiNet is enabled
-					FUJINET_DEBUG_LOG("SIO_PutByte: Command frame complete, device 0x%02X is valid (local disk status=%d)", 
-						CommandFrame[0], CommandFrame[0] >= 0x31 && CommandFrame[0] <= 0x38 ? 
-						SIO_drive_status[CommandFrame[0]-0x31] : -1);
-#endif
 					TransferStatus = SIO_StatusRead;
 					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
 				}
 #ifdef USE_FUJINET
+				// Also allow disk drives (0x31-0x38) to be valid when FujiNet is enabled
+				else if (fujinet_enabled && CommandFrame[0] >= 0x31 && CommandFrame[0] <= 0x38) {
+					TransferStatus = SIO_StatusRead;
+					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
+				}
 				// Handle dedicated FujiNet device 0x70
 				else if (CommandFrame[0] == 0x70) { 
-					FUJINET_DEBUG_LOG("SIO_PutByte: Command frame complete, device 0x%02X is FujiNet", CommandFrame[0]);
 					TransferStatus = SIO_StatusRead;
 					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL + SIO_ACK_INTERVAL;
 				}
@@ -1566,28 +1607,71 @@ void SIO_PutByte(int byte)
 /* Get a byte that comes out of POKEY. So get it here... */
 int SIO_GetByte(void)
 {
+	int byte = 0;
+
 #ifdef USE_FUJINET
-	/* When FujiNet is enabled, route all data retrieval through our refactored handler */
+	/* Check if FujiNet is enabled and we're handling disk or FujiNet devices */
 	if (fujinet_enabled) {
-		FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet enabled, retrieving byte from refactored handler");
-		int byte = SIO_Handler_Get_Byte();
-		FUJINET_DEBUG_LOG("SIO_GetByte: Retrieved byte 0x%02X from refactored handler", byte);
-		return byte;
+		UBYTE sio_devic = MEMORY_dGetByte(0x300);
+		
+		/* Only use refactored handler for FujiNet device or disk devices when FujiNet is enabled */
+		if (sio_devic == 0x70 || (sio_devic >= 0x31 && sio_devic <= 0x38)) {
+			FUJINET_DEBUG_LOG("SIO_GetByte: Using refactored SIO handler for device 0x%02X", sio_devic);
+			return SIO_Handler_Get_Byte();
+		}
 	}
 	
-	FUJINET_DEBUG_LOG("SIO_GetByte: Using original handler (state=%d) - FujiNet disabled",
-                    TransferStatus);
-#endif
+	/* The legacy FujiNet handling when in SIO_DataSend state (will be removed after full refactoring) */
+	if (fujinet_enabled && TransferStatus == SIO_DataSend) {
+		uint8_t fuji_byte;
+		int fuji_result = FujiNet_SIO_GetByte(&fuji_byte);
+
+		if (fuji_result == 1) { /* Data byte received */
+			int current_pos = FujiNet_SIO_GetResponseBufferPos(); // Note: This is pos *after* reading
+			int buffer_size = FujiNet_SIO_GetResponseBufferSize();
+
+			if (current_pos == buffer_size) { 
+				/* This was the LAST byte */
+				FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet returned FINAL data byte 0x%02X (pos %d/%d)", 
+								 fuji_byte, current_pos, buffer_size);
+				byte = fuji_byte;
+				TransferStatus = SIO_FujiNet_Completion; /* Go to completion state */
+				/* Schedule IRQ for OS to request the final 'C' byte */
+				POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; 
+			} else {
+				/* More bytes expected */
+				FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet returned data byte 0x%02X (pos %d/%d)", 
+								 fuji_byte, current_pos, buffer_size);
+				byte = fuji_byte;
+				/* Schedule IRQ for OS to request the next byte */
+				POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL; 
+			}
+		} else if (fuji_result == 0) { 
+			/* Should not happen if logic is correct, means SIO_GetByte called after last byte */
+			FUJINET_DEBUG_LOG("SIO_GetByte: ERROR - FujiNet buffer empty when byte requested!");
+			TransferStatus = SIO_NoFrame; 
+			CommandIndex = 0;
+			byte = SIO_ERROR_FRAME; 
+		} else { /* Error from FujiNet_SIO_GetByte (e.g., -1) */
+			FUJINET_DEBUG_LOG("SIO_GetByte: FujiNet_SIO_GetByte returned error %d", fuji_result);
+			TransferStatus = SIO_NoFrame; 
+			CommandIndex = 0;
+			byte = SIO_ERROR_FRAME; 
+		}
+	}
+#endif /* USE_FUJINET */
+
 	switch (TransferStatus) {
 	case SIO_StatusRead:
-		return Command_Frame(DataBuffer);    /* Handle now the command */
+		byte = Command_Frame(DataBuffer);    /* Handle now the command */
+		break;
 	case SIO_FormatFrame:
 		TransferStatus = SIO_ReadFrame;
 		POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL << 3;
 		/* FALL THROUGH */
 	case SIO_ReadFrame:
 		if (DataIndex < ExpectedBytes) {
-			int byte = DataBuffer[DataIndex++];
+			byte = DataBuffer[DataIndex++];
 			if (DataIndex >= ExpectedBytes) {
 				TransferStatus = SIO_NoFrame;
 			}
@@ -1596,17 +1680,15 @@ int SIO_GetByte(void)
 				POKEY_DELAYED_SERIN_IRQ = (DataIndex == 1) ? SIO_SERIN_INTERVAL
 					: ((SIO_SERIN_INTERVAL * POKEY_AUDF[POKEY_CHAN3] - 1) / 0x28 + 1);
 			}
-			return byte;
 		}
 		else {
 			Log_print("Invalid read frame!");
 			TransferStatus = SIO_NoFrame;
-			return SIO_ERROR; /* Cascade Fix: Add missing return */
 		}
 		break;
 	case SIO_FinalStatus:
 		if (DataIndex < ExpectedBytes) {
-			int byte = DataBuffer[DataIndex++];
+			byte = DataBuffer[DataIndex++];
 			if (DataIndex >= ExpectedBytes) {
 				TransferStatus = SIO_NoFrame;
 			}
@@ -1616,17 +1698,15 @@ int SIO_GetByte(void)
 				else
 					POKEY_DELAYED_SERIN_IRQ = SIO_SERIN_INTERVAL;
 			}
-			return byte;
 		}
 		else {
 			Log_print("Invalid read frame!");
 			TransferStatus = SIO_NoFrame;
-			return SIO_ERROR; /* Cascade Fix: Add missing return */
 		}
 		break;
 	case SIO_FujiNet_Completion:
 		FUJINET_DEBUG_LOG("SIO_GetByte: Sending final SIO_COMPLETE (C) byte.");
-		int byte = SIO_COMPLETE;
+		byte = SIO_COMPLETE;
 		TransferStatus = SIO_NoFrame; // Now the transfer is fully complete
 		CommandIndex = 0;
 		/* Set CPU status registers to signal successful completion, like original SIO_Handler */
@@ -1635,10 +1715,12 @@ int SIO_GetByte(void)
 		CPU_SetC;
 		FUJINET_DEBUG_LOG("SIO_GetByte: Set CPU status registers Y=1, C=1, N=0");
 		/* DO NOT schedule next IRQ */
-		return byte;
+		break;
 	default:
-		return CASSETTE_GetByte();
+		byte = CASSETTE_GetByte();
+		break;
 	}
+	return byte;
 }
 
 #if !defined(BASIC) && !defined(__PLUS)

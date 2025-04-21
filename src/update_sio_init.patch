@@ -1,0 +1,14 @@
+--- sio.c.orig	2023-04-20 16:26:19
++++ sio.c	2023-04-20 16:26:19
+@@ -230,6 +230,11 @@
+ 		printf("***** FUJINET INITIALIZED SUCCESSFULLY *****\\n");
+ 		fflush(stdout);
+ 		Log_print("FujiNet: Initialized successfully");
++
++		/* Initialize our new state machine and handlers */
++		SIO_State_Init();
++		SIO_Handler_Init();
++		FujiNet_SIO_Handler_Init();
+ #ifdef DEBUG_FUJINET
+ 		printf("***** FUJINET DEBUG OUTPUT ENABLED *****\\n");
+ 		fflush(stdout);

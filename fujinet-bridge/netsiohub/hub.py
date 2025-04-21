@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 
-from netsiohub import deviceserver
-from netsiohub.netsio import *
+from . import deviceserver
+from .netsio import *
+# Import the TCP handler with a unique name to avoid conflict
+print("\n***** IMPORTING NetSIOHandler FROM DEVICESERVER.PY *****")
+from .deviceserver import NetSIOHandler as DeviceNetSIOHandler
+print(f"***** IMPORTED HANDLER CLASS: {DeviceNetSIOHandler.__name__} FROM {DeviceNetSIOHandler.__module__} *****\n")
 
 from enum import IntEnum
 import socket, socketserver
@@ -12,12 +16,8 @@ import time
 import struct
 import argparse
 
-# Define missing constants
-ATDEV_NAK_RESPONSE = 0x8F  # NAK response for sync messages
-ATDEV_EMPTY_SYNC = 0x00    # Empty sync response
-
 try:
-    from netsiohub.serial import *
+    from .serial import *
     has_serial = True
 except ModuleNotFoundError:
     has_serial = False
@@ -27,38 +27,6 @@ _start_time = timer()
 def print_banner():
     print("NetSIO HUB", HUB_VERSION)
 
-def log_trace(message):
-    """Enhanced helper for consistent logging"""
-    # Get current timestamp with millisecond precision
-    timestamp = time.time()
-    # Format: [TRACE] [timestamp] message
-    formatted_message = f"[TRACE] [{timestamp:.6f}]: {message}"
-    # Print to stdout and also to a log file if needed
-    print(formatted_message)
-    # Optionally write to a file for permanent logging
-    # with open("netsiohub.log", "a") as f:
-    #     f.write(formatted_message + "\n")
-
-def log_sio_command(devid, cmd, aux1, aux2, checksum=None):
-    """Helper to log SIO command in a standardized format"""
-    cmd_name = "UNKNOWN"
-    # Map common SIO commands to names for better readability
-    cmd_map = {
-        0x40: "GET_STATUS", 
-        0x52: "READ_SECTOR",
-        0x50: "WRITE_SECTOR",
-        0x53: "STATUS",
-        0x21: "FORMAT_DISK",
-        0x22: "FORMAT_ENHANCED",
-        0x4E: "READ_STATUS_BLOCK",
-        0x4F: "WRITE_STATUS_BLOCK",
-        0x57: "WRITE_VERIFY"
-    }
-    if cmd in cmd_map:
-        cmd_name = cmd_map[cmd]
-    
-    checksum_str = f", CHKSUM=0x{checksum:02X}" if checksum is not None else ""
-    log_trace(f"SIO COMMAND: DEV=0x{devid:02X} CMD=0x{cmd:02X}({cmd_name}) AUX1=0x{aux1:02X} AUX2=0x{aux2:02X}{checksum_str}")
 
 class NetSIOClient:
     def __init__(self, address, sock):
@@ -243,12 +211,8 @@ class NetSIOServer(socketserver.UDPServer):
         return client
 
     def send_to_client(self, client:NetSIOClient, msg):
-        # Only log if it's not an ALIVE response to reduce noise
-        if msg.id != NETSIO_ALIVE_RESPONSE:
-            log_trace(f"NetSIOServer.send_to_client: Sending msg {msg} via UDP to {addrtos(client.address)}")
         client.sock.sendto(struct.pack('B', msg.id) + msg.arg, client.address)
-        # Keep debug_print active for now, or comment if needed
-        # debug_print("> NET {} {}".format(addrtos(client.address), msg))
+        debug_print("> NET {} {}".format(addrtos(client.address), msg))
 
     def send_to_all(self, msg):
         """broadcast all connected netsio devices"""
@@ -278,10 +242,20 @@ class NetSIOServer(socketserver.UDPServer):
         
     def connected(self):
         """Return true if any client is connected"""
-        return len(self.clients) > 0
+        with self.clients_lock:
+            return len(self.clients) > 0
 
     def credit_clients(self):
-        return self.hub.device_manager.credit_clients()
+        # send credits to waiting clients if there is a room in a queue
+        credit = DEFAULT_CREDIT - self.hub.host_queue.qsize()
+        if credit >= 2:
+            with self.clients_lock:
+                clients = list(self.clients.values())
+            msg = NetSIOMsg(NETSIO_CREDIT_UPDATE, credit)
+            for c in clients:
+                if c.update_credit(credit):
+                    self.send_to_client(c, msg)
+
 
 class NetSIOHandler(socketserver.BaseRequestHandler):
     """NetSIO received packet handler"""
@@ -328,18 +302,11 @@ class NetSIOHandler(socketserver.BaseRequestHandler):
                     NetSIOMsg(NETSIO_PING_RESPONSE)
                 )
             elif msg.id == NETSIO_ALIVE_REQUEST:
-                # log_trace(f"NetSIOHandler received NETSIO_ALIVE_REQUEST: {msg}") # Commented out to reduce noise
+                # alive, send alive response (only if connected/registered)
                 client = self.server.get_client(self.client_address)
                 if client is not None:
                     client.refresh()
-                    # Try to update credit if payload exists
-                    if msg.arg and len(msg.arg) > 0: 
-                        client.update_credit(msg.arg[0]) # Try updating credit, ignore result for response
-                    else:
-                        pass # log_trace(f"NetSIOHandler: Received NETSIO_ALIVE_REQUEST with empty msg.arg from {client.address}") # Commented out
-                    
-                    # Always send ALIVE response regardless of payload content
-                    self.server.send_to_client(client, NetSIOMsg(NETSIO_ALIVE_RESPONSE)) 
+                    self.server.send_to_client(client, NetSIOMsg(NETSIO_ALIVE_RESPONSE))
             elif msg.id == NETSIO_CREDIT_STATUS:
                 client = self.server.get_client(self.client_address)
                 if client is not None and len(msg.arg):
@@ -349,6 +316,7 @@ class NetSIOHandler(socketserver.BaseRequestHandler):
                     credit = DEFAULT_CREDIT - self.server.hub.host_queue.qsize()
                     if credit >= 2 and client.update_credit(credit):
                         self.server.send_to_client(client, NetSIOMsg(NETSIO_CREDIT_UPDATE, credit))
+
 
 class NetOutThread(threading.Thread):
     """Thread to send "messages" to connected netsio devices"""
@@ -363,7 +331,6 @@ class NetOutThread(threading.Thread):
             msg = self.queue.get()
             if msg is None:
                 break
-            log_trace(f"NetOutThread.run: Got msg {msg} from queue. Forwarding to NetSIOServer.send_to_all")
             self.server.send_to_all(msg)
 
         debug_print("NetOutThread stopped")
@@ -373,6 +340,7 @@ class NetOutThread(threading.Thread):
         clear_queue(self.queue)
         self.queue.put(None) # stop sign
         self.join()
+
 
 class NetSIOManager(DeviceManager):
     """Manages NetSIO (SIO over UDP) traffic"""
@@ -413,10 +381,8 @@ class NetSIOManager(DeviceManager):
             clear_queue(self.device_queue)
 
         if self.device_queue.full():
-            log_trace(f"NetSIOManager.to_peripheral: Device queue FULL, cannot queue {msg}")
             debug_print("device queue FULL")
         else:
-            log_trace(f"NetSIOManager.to_peripheral: Queuing msg {msg} for device. Queue size: {self.device_queue.qsize()}")
             debug_print("device queue [{}]".format(self.device_queue.qsize()))
 
         self.device_queue.put(msg)
@@ -438,7 +404,7 @@ class AtDevManager(HostManager):
 
     def run(self, hub):
         self.hub = hub
-        deviceserver.run_deviceserver(AtDevHandler, NETSIO_ATDEV_PORT, self.arg_parser, self.run_server)
+        deviceserver.run_deviceserver(DeviceNetSIOHandler, NETSIO_ATDEV_PORT, self.arg_parser, self.run_server)
 
     def run_server(self, server):
         # make hub available to handler (via server object)
@@ -449,143 +415,31 @@ class AtDevManager(HostManager):
         # TODO stop AtDevThread, if still running
         pass
 
-class AtDevHandler(deviceserver.DeviceTCPHandler):
+
+class AtDevHandler(DeviceNetSIOHandler):
     """Handler to communicate with netsio.atdevice which lives in Altirra"""
     def __init__(self, *args, **kwargs):
-        log_trace("AtDevHandler.__init__ called")
+        print("\n***** INITIALIZING AtDevHandler *****")
+        print(f"***** PARENT CLASS: {self.__class__.__mro__[1].__name__} *****")
+        print(f"***** ARGS: {args} *****")
+        print(f"***** KWARGS: {kwargs} *****\n")
         
-        # Populate handlers BEFORE calling super().__init__ so base class handle() can find them
-        # Key: Altirra Event Code, Value: (Name_String, Handler_Method)
-        self.handlers = {
-            NETSIO_COMMAND_ON: ("COMMAND_ON", self.handle_netsio_command_on),
-            NETSIO_DATA_BLOCK: ("DATA_BLOCK", self.handle_netsio_data_block),
-            NETSIO_COMMAND_OFF_SYNC: ("COMMAND_OFF_SYNC", self.handle_netsio_command_off_sync),
-            NETSIO_WARM_RESET: ("WARM_RESET", self.handle_warmreset),
-            NETSIO_COLD_RESET: ("COLD_RESET", self.handle_coldreset),
-            EVENT_SCRIPT_POST: ("SCRIPT_POST", self.handle_sio_frame), # Handle SIO Frame from Emulator
-            # Add other handlers as needed (e.g., NETSIO_READ_BLOCK?)
-        }
-        
-        # Initialize other AtDevHandler specific attributes
+        debug_print("AtDevHandler")
         self.hub = None
         self.atdev_ready = None
         self.atdev_thread = None
         self.busy_at = timer()
         self.idle_at = timer()
         self.emu_ts = 0
-        
-        # Now call the base class __init__
         super().__init__(*args, **kwargs)
+        print(f"***** AtDevHandler INIT COMPLETE *****\n")
 
-    # --- NEW Handler Methods for Altirra TCP Events ---
-    def send_altirra_response(self, event, arg, data=None, timestamp=0):
-        """Send an Altirra protocol message back to the client."""
-        if data is None:
-            data = bytes()
-        
-        # Construct payload: event (1 byte) + arg (1 byte) + optional data
-        payload = bytearray([event, arg]) + data
-        
-        # Construct header: total_length (4 bytes) + timestamp (4 bytes)
-        # Make sure total_length is correct (8 for header + payload length)
-        total_length = 8 + len(payload)  # 8 is header size
-        
-        # Use a known timestamp (0) to avoid any issues
-        header = struct.pack('<II', total_length, 0)  # Use 0 for timestamp to be safe
-        
-        # Construct the full message
-        message = header + payload
-        
-        # Print the full message in hex for debugging
-        log_trace(f"Sending Altirra Response: Len={total_length}, Evt=0x{event:02X}, Arg=0x{arg:02X}")
-        log_trace(f"Message hex: {' '.join([f'{b:02X}' for b in message])}")
-        
-        try:
-            self.request.sendall(message)
-            return True
-        except (ConnectionResetError, BrokenPipeError) as e:
-            log_trace(f"Error sending Altirra response: {e}")
-            return False
-            
-    def handle_netsio_command_on(self, event: int, arg: int, data: bytes, timestamp: int):
-        """Handles NETSIO_COMMAND_ON (0x11) event from Altirra message."""
-        log_trace(f"INCOMING from Emulator: COMMAND_ON for device 0x{arg:02X}")
-        ts = timer()
-        self.emu_ts = timestamp 
-        msg = NetSIOMsg(event, arg) # COMMAND_ON uses device ID as arg
-        msg.time = ts
-        # This is an asynchronous command start
-        log_trace(f"AtDevHandler.handle_netsio_command_on: Forwarding COMMAND_ON for device 0x{arg:02X} to hub")
-        self.hub.handle_host_msg(msg)
-        # No response needed for this asynchronous event
-
-    def handle_netsio_data_block(self, event: int, arg: int, data: bytes, timestamp: int):
-        """Handles NETSIO_DATA_BLOCK (0x02) event from Altirra message."""
-        log_trace(f"INCOMING from Emulator: DATA_BLOCK (len={len(data)}) Data: {data.hex(' ')}")
-        ts = timer()
-        self.emu_ts = timestamp
-        # DATA_BLOCK message carries the SIO bytes (Cmd, Aux1, Aux2) in the 'data' part
-        # The 'arg' in the Altirra message is the *length* of the data, but NetSIOMsg expects the actual data bytes
-        # Log the SIO command if this is a command sequence (typically 3 bytes: CMD, AUX1, AUX2)
-        if len(data) >= 3:
-            cmd = data[0]
-            aux1 = data[1]
-            aux2 = data[2]
-            log_sio_command(arg, cmd, aux1, aux2)  # Here 'arg' is often the device ID
-        
-        msg = NetSIOMsg(event, data) 
-        msg.time = ts
-        # This is asynchronous data transfer
-        log_trace(f"AtDevHandler.handle_netsio_data_block: Forwarding DATA_BLOCK to hub: {' '.join([f'{b:02X}' for b in data])}")
-        self.hub.handle_host_msg(msg)
-        # No response needed for this asynchronous event
-
-    def handle_netsio_command_off_sync(self, event: int, arg: int, data: bytes, timestamp: int):
-        """Handles NETSIO_COMMAND_OFF_SYNC (0x18) event from Altirra message."""
-        log_trace(f"INCOMING from Emulator: COMMAND_OFF_SYNC SyncNum={arg} Checksum=0x{data[0]:02X}")
-        ts = timer()
-        self.emu_ts = timestamp
-        msg = NetSIOMsg(event, [data[0]]) # COMMAND_OFF_SYNC uses checksum as arg
-        msg.arg.append(arg) # Append sync number AFTER checksum
-        msg.time = ts
-        # This event expects a response (ACK/NAK etc.), so use sync handler
-        log_trace(f"AtDevHandler.handle_netsio_command_off_sync: Forwarding COMMAND_OFF_SYNC to hub (checksum=0x{data[0]:02X})")
-        result = self.hub.handle_host_msg_sync(msg)
-        log_trace(f"AtDevHandler.handle_netsio_command_off_sync: Received result 0x{result:02X} from hub")
-        
-        # First send the SYNC_RESPONSE back to the client using the Altirra protocol
-        log_trace(f"AtDevHandler.handle_netsio_command_off_sync: Sending SYNC_RESPONSE (0x81) with result=0x{result:02X}")
-        self.send_altirra_response(NETSIO_SYNC_RESPONSE, result, timestamp=timestamp)
-        
-        # Determine the command from the most recent DATA_BLOCK message
-        # For this test app, we know it's a "Get Status" command (0x4E)
-        # For a real implementation, we'd need to track the actual command
-        
-        # For "Get Status" command, we need to send 'C' status byte plus 128 bytes of data
-        log_trace(f"AtDevHandler.handle_netsio_command_off_sync: Sending SIO response bytes for 'Get Status' command")
-        
-        # Create a complete response buffer: 'C' (0x43) status byte followed by 128 bytes of data
-        # For this test, we'll just fill it with incrementing values
-        response_data = bytearray(129)  # 1 status byte + 128 data bytes
-        response_data[0] = 0x43  # 'C' status byte
-        
-        # Fill the remaining 128 bytes with some pattern (incrementing values)
-        for i in range(1, 129):
-            response_data[i] = i & 0xFF
-        
-        # Send each byte of the response as a separate NETSIO_DATA_BYTE message
-        log_trace(f"AtDevHandler.handle_netsio_command_off_sync: Sending 129 individual DATA_BYTE messages")
-        for i, byte_value in enumerate(response_data):
-            self.send_altirra_response(NETSIO_DATA_BYTE, byte_value, timestamp=timestamp)
-            log_trace(f"Sent SIO response byte {i}: 0x{byte_value:02X}")
-            # Short delay between bytes to avoid flooding the socket
-            if i > 0 and i % 10 == 0:  # Insert a small delay every 10 bytes
-                time.sleep(0.001)
-        
-    # --- Existing Methods --- 
     def handle(self):
-        log_trace("AtDevHandler.handle: New TCP connection from {}".format(self.client_address))
         """handle messages from netsio.atdevice"""
+        print("\n***** ATDEVHANDLER.HANDLE CALLED *****")
+        print(f"***** HANDLER TYPE: {self.__class__.__name__} *****")
+        print(f"***** CLIENT IP: {self.client_address} *****\n")
+        
         # start thread for outgoing messages to atdevice
         self.hub = self.server.hub
         self.atdev_ready = threading.Event()
@@ -595,10 +449,22 @@ class AtDevHandler(deviceserver.DeviceTCPHandler):
         self.atdev_thread.start()
 
         try:
-            super().handle()
+            # Call DeviceNetSIOHandler.handle explicitly to use our enhanced SIO processing logic
+            print("\n***** CALLING DEVICENETSIOHANDER.HANDLE DIRECTLY *****")
+            # Initialize SIO command tracking variables
+            self.sio_command_buffer = bytearray()
+            self.current_device_id = 0
+            self.current_command = None
+            
+            DeviceNetSIOHandler.handle(self)  # Call the handler directly instead of super().handle()
         except ConnectionResetError:
             info_print("Host reset connection")
+        except Exception as e:
+            print(f"***** ERROR IN HANDLER: {str(e)} *****")
+            import traceback
+            traceback.print_exc()
         finally:
+            print("\n***** ATDEVHANDLER.HANDLE EXITING *****")
             self.hub.host_disconnected()
             self.atdev_thread.stop()
 
@@ -609,35 +475,32 @@ class AtDevHandler(deviceserver.DeviceTCPHandler):
         msg:NetSIOMsg = None
 
         if event == ATDEV_READY:
-            log_trace(f"AtDevHandler.handle_script_post: Received ATDEV_READY")
             # POKEY is ready to receive serial data
             msg = NetSIOMsg(event)
         elif event == NETSIO_DATA_BYTE:
-            log_trace(f"AtDevHandler.handle_script_post: Received NETSIO_DATA_BYTE (0x{arg:02X})")
             # serial byte from POKEY
             msg = NetSIOMsg(event, arg)
             # self.hub.handle_host_msg(NetSIOMsg(event, arg))
         elif event == NETSIO_SPEED_CHANGE:
-            log_trace(f"AtDevHandler.handle_script_post: Received NETSIO_SPEED_CHANGE (arg={arg})")
             # serial output speed changed
             msg = NetSIOMsg(event, struct.pack("<L", arg))
             # self.hub.handle_host_msg(NetSIOMsg(event, struct.pack("<L", arg)))
         elif event < 0x100: # fit byte
             # all other (one byte) events from atdevice
-            log_trace(f"AtDevHandler.handle_script_post: Received event 0x{event:02X}")
             msg = NetSIOMsg(event)
             if event == NETSIO_COLD_RESET:
                 self.atdev_ready.set()
-        # send to connected devices
-        msg = NetSIOMsg(event)
-        # self.hub.handle_host_msg(NetSIOMsg(event))
+            # send to connected devices
+            msg = NetSIOMsg(event)
+            # self.hub.handle_host_msg(NetSIOMsg(event))
+        elif event == ATDEV_DEBUG_NOP:
+            msg = NetSIOMsg(event)
 
         if msg is None:
             debug_print("> ATD {:02X} {:02X} ++{} -> {}".format(event, arg, timestamp-self.emu_ts))
             info_print("Invalid ATD")
             return
 
-        log_trace(f"AtDevHandler.handle_script_post: Forwarding msg {msg} to hub.handle_host_msg")
         msg.time = ts
         debug_print("> ATD {:02X} {:02X} ++{} -> {}".format(event, arg, timestamp-self.emu_ts, msg))
         if event == ATDEV_READY:
@@ -654,17 +517,12 @@ class AtDevHandler(deviceserver.DeviceTCPHandler):
 
         result = ATDEV_EMPTY_SYNC
         if event == NETSIO_DATA_BYTE_SYNC:
-            log_trace(f"INCOMING from Emulator (Sync): DATA_BYTE_SYNC Byte=0x{arg:02X}")
             msg = NetSIOMsg(event, arg) # request sn will be appended
         elif event == NETSIO_COMMAND_OFF_SYNC:
-            log_trace(f"INCOMING from Emulator (Sync): COMMAND_OFF_SYNC SyncNum={arg}")
             msg = NetSIOMsg(event) # request sn will be appended
         elif event == NETSIO_DATA_BLOCK:
-             # This path seems incorrect for sync handling, DATA_BLOCK should likely use handle_host_msg
-            log_trace(f"INCOMING from Emulator (Sync): DATA_BLOCK (len={arg}) - Will Read Data")
             msg = NetSIOMsg(event) # data block will be read
         elif event == ATDEV_DEBUG_NOP:
-            log_trace(f"INCOMING from Emulator (Sync): DEBUG_NOP Arg={arg}")
             msg = NetSIOMsg(event, arg)
             local = True
             result = arg
@@ -681,22 +539,21 @@ class AtDevHandler(deviceserver.DeviceTCPHandler):
             # get data from rxbuffer segment
             debug_print("< ATD READ_BUFFER", arg)
             msg.arg = self.req_read_seg_mem(1, 0, arg)
-            log_trace(f"AtDevHandler.handle_script_event: Read data block: {msg.arg}")
+            debug_print("  ATD ->", msg)
         if not local:
-            log_trace(f"AtDevHandler.handle_script_event: Forwarding msg {msg} to hub.handle_host_msg_sync")
             result = self.hub.handle_host_msg_sync(msg)
         debug_print("< ATD RESPONSE {} = 0x{:02X} +{:.0f}".format(result, result, msg.elapsed_us()))
-        log_trace(f"AtDevHandler.handle_script_event: Returning result 0x{result:02X}")
         return result
 
-    def handle_coldreset(self, event: int, arg: int, data: bytes, timestamp: int):
-        """Handles NETSIO_COLD_RESET (0xFF) event from Altirra message."""
-        log_trace(f"INCOMING from Emulator: COLD_RESET")
-        self.hub.handle_host_msg(NetSIOMsg(NETSIO_COLD_RESET))
+    def handle_coldreset(self, timestamp):
+        debug_print("> ATD COLD RESET")
+        self.emu_ts = timestamp
+        # In some cases Altirra does send Cold reset message without cold-resetting emulated Atari
+        # self.hub.handle_host_msg(NetSIOMsg(NETSIO_COLD_RESET))
 
-    def handle_warmreset(self, event: int, arg: int, data: bytes, timestamp: int):
-        """Handles NETSIO_WARM_RESET (0xFE) event from Altirra message."""
-        log_trace(f"INCOMING from Emulator: WARM_RESET")
+    def handle_warmreset(self, timestamp):
+        debug_print("> ATD WARM RESET")
+        self.emu_ts = timestamp
         self.hub.handle_host_msg(NetSIOMsg(NETSIO_WARM_RESET))
 
     def clear_rtr(self):
@@ -715,34 +572,6 @@ class AtDevHandler(deviceserver.DeviceTCPHandler):
         """Wait for ready receiver"""
         return self.atdev_ready.wait(timeout)
 
-    def handle_sio_frame(self, event: int, arg: int, data: bytes, timestamp: int):
-        """Handles an SIO command frame received from the emulator via Altirra protocol."""
-        if event != EVENT_SCRIPT_POST:
-            log_trace(f"AtDevHandler.handle_sio_frame called with unexpected event 0x{event:02X}")
-            return
-
-        if not data or len(data) != 5:
-            log_trace(f"INCOMING from Emulator: Invalid SIO frame data (len={len(data)}). Expected 5 bytes.")
-            return
-
-        # Extract the SIO command frame bytes
-        # Format: DeviceID (1), Command (1), Aux1 (1), Aux2 (1), Checksum (1)
-        sio_frame = data
-        devid, cmd, aux1, aux2, chksum = sio_frame
-
-        # Log the INCOMING frame clearly
-        log_trace(f"INCOMING from Emulator: SIO Frame: {sio_frame.hex(' ')}")
-        log_sio_command(devid, cmd, aux1, aux2, chksum) # Log parsed command
-
-        # Create a NetSIO message to forward the SIO frame
-        # Using NETSIO_DATA_BLOCK as observed in original logic
-        msg = NetSIOMsg(NETSIO_DATA_BLOCK, sio_frame)
-        msg.time = timer() # Use current time
-
-        # Forward the message through the hub's logic
-        log_trace(f"AtDevHandler: Passing SIO frame as DATA_BLOCK to hub.handle_host_msg")
-        self.hub.handle_host_msg(msg)
-
 class AtDevThread(threading.Thread):
     """Thread to send "messages" to Altrira atdevice"""
     def __init__(self, queue, handler):
@@ -753,51 +582,104 @@ class AtDevThread(threading.Thread):
         super().__init__()
 
     def run(self):
-        log_trace("AtDevThread started")
-        while not self.stop_flag.is_set():
-            try:
-                # Blocking wait with timeout
-                msg = self.queue.get(timeout=1.0/50) # try approx. every frame
-                log_trace(f"AtDevThread received msg from queue: {msg}") # Log the raw message
-                if msg is None:
-                    log_trace("AtDevThread received None, likely stopping.")
-                    continue # Skip processing if None
-                try:
-                    msglen = len(msg.arg) # Now safe to access msg.arg
-                    if msglen > 0:
-                        # Altirra protocol requires a separate message for each byte
-                        data = msg.arg
-                        for b in data:
-                            log_trace(f"AtDevThread: sending NETSIO_DATA_BYTE 0x{b:02X}")
-                            if not self.atdev_handler.atdev_ready.wait(0.100):
-                                break
-                            # Send one byte at a time to client
-                            self.atdev_handler.send_altirra_response(NETSIO_DATA_BYTE, b, timestamp=msg.time)
-                            # Don't flood the connection
-                            time.sleep(0.001)
-                    # For non-data messages, just send the event code
-                    elif msg.id != NETSIO_CREDIT_UPDATE: # Fixed constant name
-                        log_trace(f"AtDevThread: sending event 0x{msg.id:02X}")
-                        self.atdev_handler.send_altirra_response(msg.id, 0, timestamp=msg.time) # Fixed method call
-                finally:
-                    self.queue.task_done()
-            except queue.Empty:
-                # Just loop again
-                pass
-            except (ConnectionResetError, BrokenPipeError) as e:
-                log_trace(f"AtDevThread connection error: {e}")
+        debug_print("AtDevThread started")
+
+        # # TODO debug text message
+        # # place message to netsio.atdevice textbuffer i.e. segment 2
+        # msg = NetSIOMsg(ATDEV_DEBUG_MESSAGE, b"Hi")
+        # self.atdev_handler.req_write_seg_mem(2, 0, msg.arg)
+        # msglen = len(msg.arg)
+        # debug_print("< ATD +{:.0f} MSG [{}] {}".format(msg.elapsed_us(), msglen, msg.arg_str()))
+        # # instruct netsio.atdevice to send rxbuffer to emulated Atari
+        # self.atdev_handler.req_interrupt(ATDEV_DEBUG_MESSAGE, msglen)
+        # debug_print("< ATD +{:.0f} {:02X} {:02X}".format(msg.elapsed_us(), ATDEV_DEBUG_MESSAGE, msglen))
+
+        while True:
+            msg = self.queue.get()
+            if self.stop_flag.is_set():
                 break
-            except Exception as e:
-                log_trace("AtDevThread error: {}".format(e))
+
+            if not self.atdev_handler.wait_rtr(5): # TODO adjustable
+                info_print("ATD TIMEOUT")
+                # TODO timeout recovery
+                clear_queue(self.queue)
+                self.atdev_handler.set_rtr()
+
+            if self.stop_flag.is_set():
                 break
-        log_trace("AtDevThread stopped")
+
+            if self.queue.qsize() < 2:
+                self.atdev_handler.hub.credit_clients()
+
+            if msg.id in (NETSIO_DATA_BYTE, NETSIO_DATA_BLOCK, NETSIO_BUS_IDLE):
+                # send byte and send buffer makes POKEY busy and
+                # we have to receive confirmation when it is ready again
+                # prior sending more data
+                self.atdev_handler.clear_rtr()
+
+            if msg.id == NETSIO_DATA_BLOCK:
+                rxsize = len(msg.arg)
+                if rxsize <= 6:
+                    # prepare compact short data block
+                    aux1 = ATDEV_TRANSMIT_BUFFER | (rxsize << 9)
+                    aux2 = 0
+                    # place firts 2 bytes into aux1
+                    if rxsize:
+                        aux1 |= (msg.arg[0] << 16)
+                    if rxsize > 1:
+                        aux1 |= (msg.arg[1] << 24)
+                    # place next 4 bytes into aux2
+                    if rxsize > 2:
+                        aux2 = msg.arg[2]
+                    if rxsize > 3:
+                        aux2 |= (msg.arg[3] << 8)
+                    if rxsize > 4:
+                        aux2 |= (msg.arg[4] << 16)
+                    if rxsize > 5:
+                        aux2 |= (msg.arg[5] << 24)
+                    debug_print("< ATD {:08X}:WRITE_&_TRANSMIT_BUFFER 0x{:08X} +{:.0f} <- {}".format(
+                        aux1, aux2, msg.elapsed_us(), msg))
+                    self.atdev_handler.req_interrupt(aux1, aux2)
+                else:
+                    # place serial data to netsio.atdevice rxbuffer i.e. segment 0
+                    debug_print("< ATD WRITE_BUFFER {} <- {}".format(rxsize, msg))
+                    self.atdev_handler.req_write_seg_mem(0, 0, msg.arg)
+                    # instruct netsio.atdevice to send rxbuffer to emulated Atari
+                    debug_print("< ATD {:02X}:TRANSMIT_BUFFER {} +{:.0f}".format(
+                        ATDEV_TRANSMIT_BUFFER, rxsize, msg.elapsed_us()))
+                    self.atdev_handler.req_interrupt(ATDEV_TRANSMIT_BUFFER, rxsize)
+            elif msg.id == NETSIO_DATA_BYTE:
+                # serial byte from remote device
+                debug_print("< ATD {}".format(msg))
+                self.atdev_handler.req_interrupt(msg.id, msg.arg[0])
+            elif msg.id == NETSIO_SPEED_CHANGE:
+                # speed change
+                if len(msg.arg) == 4:
+                    debug_print("< ATD {}".format(msg))
+                    self.atdev_handler.req_interrupt(msg.id, struct.unpack('<L', msg.arg)[0])
+                else:
+                    info_print("Invalid NETSIO_SPEED_CHANGE message")
+            elif msg.id == NETSIO_BUS_IDLE:
+                # speed change
+                if len(msg.arg) == 2:
+                    debug_print("< ATD {}".format(msg))
+                    self.atdev_handler.req_interrupt(msg.id, struct.unpack('<H', msg.arg)[0])
+                else:
+                    info_print("Invalid NETSIO_BUS_IDLE message")
+            else:
+                # all other
+                debug_print("< ATD {}".format(msg))
+                self.atdev_handler.req_interrupt(msg.id, msg.arg[0] if len(msg.arg) else 0)
+
+        debug_print("AtDevThread stopped")
 
     def stop(self):
-        log_trace("Stopping AtDevThread")
+        debug_print("Stop AtDevThread")
         self.stop_flag.set()
         # clear_queue(self.queue) # things can cumulate here ...
         self.queue.put(None) # unblock queue.get()
         self.join()
+
 
 class NetSIOHub:
     """HUB connecting NetSIO devices with Atari host"""
@@ -846,21 +728,30 @@ class NetSIOHub:
         self.host_ready = threading.Event()
         self.host_handler:AtDevHandler = None
         self.sync = NetSIOHub.SyncRequest()
-        self.pending_sio_command = None # State for reconstructing SIO command frame
 
     def run(self):
+        print("\n***** NETSIOHUB.RUN STARTING *****\n")
         try:
+            # start server thread for device communication
             self.device_manager.start(self)
+            
+            # start server for host emulator communication
+            # NOTE: this will block until server is stopped
             self.host_manager.run(self)
         finally:
+            # join device thread
             self.device_manager.stop()
             self.host_manager.stop()
 
-    def host_connected(self, host_handler:AtDevHandler): # TODO replace call to AtDevHandler.clear_rtr()
-        info_print("Host connected")
+    def host_connected(self, host_handler:AtDevHandler):
+        print("\n***** NETSIOHUB.HOST_CONNECTED CALLED *****")
+        print(f"***** HOST HANDLER TYPE: {host_handler.__class__.__name__} *****")
+        print(f"***** HOST HANDLER MRO: {host_handler.__class__.__mro__} *****\n")
+        
         self.host_handler = host_handler
+        host_queue = self.host_queue
         self.host_ready.set()
-        return self.host_queue
+        return host_queue
 
     def host_disconnected(self):
         info_print("Host disconnected")
@@ -870,238 +761,133 @@ class NetSIOHub:
 
     def handle_host_msg(self, msg:NetSIOMsg):
         """handle message from Atari host emulator, emulation is running"""
-        log_trace(f"NetSIOHub.handle_host_msg: Received message ID=0x{msg.id:02X}")
-        
-        # Detailed logging based on message type
-        if msg.id == NETSIO_COMMAND_ON:
-            device_id = msg.arg[0] if isinstance(msg.arg, (bytes, bytearray)) and len(msg.arg) > 0 else msg.arg
-            log_trace(f"NetSIOHub.handle_host_msg: COMMAND_ON for device 0x{device_id:02X}")
-        elif msg.id == NETSIO_DATA_BLOCK:
-            if isinstance(msg.arg, (bytes, bytearray)):
-                data_hex = ' '.join([f'{b:02X}' for b in msg.arg])
-                log_trace(f"NetSIOHub.handle_host_msg: DATA_BLOCK with data: {data_hex}")
-                
-                # If this is a 5-byte block, it might be a full SIO command frame
-                if len(msg.arg) == 5:
-                    log_trace(f"NetSIOHub.handle_host_msg: Possible SIO command frame detected: {data_hex}")
-                    log_sio_command(msg.arg[0], msg.arg[1], msg.arg[2], msg.arg[3], msg.arg[4])
-        elif msg.id == NETSIO_COMMAND_OFF_SYNC:
-            # Log forwarding of COMMAND_OFF_SYNC, including payload (checksum)
-            checksum_val = msg.arg[0] if isinstance(msg.arg, (list, bytearray, bytes)) and len(msg.arg) > 0 else None
-            sync_num = msg.arg[1] if isinstance(msg.arg, (list, bytearray, bytes)) and len(msg.arg) > 1 else None # Original SN from emulator
-
-            if checksum_val is not None:
-                checksum_str = f"0x{checksum_val:02X}"
-            else:
-                checksum_str = 'N/A'
-            log_trace(f"NetSIOHub.handle_host_msg: Forwarding COMMAND_OFF_SYNC (SyncNum={sync_num}, Checksum={checksum_str})")
-        # Add other message types if needed
-        else:
-            log_trace(f"NetSIOHub.handle_host_msg: Forwarding unhandled message ID=0x{msg.id:02X}")
-        
         if msg.id in (NETSIO_COLD_RESET, NETSIO_WARM_RESET):
             info_print("HOST {} RESET".format("COLD" if msg.id == NETSIO_COLD_RESET else "WARM"))
             # # clear I/O queues on emulator cold / warm reset
             # debug_print("CLEAR HOST QUEUE")
             # clear_queue(self.host_queue)
-        
-        # --- SIO Command Reconstruction Logic ---
-        if msg.id == NETSIO_COMMAND_ON:
-            # Start of an SIO command sequence
-            dev_id = msg.arg # Arg holds the Device ID
-            
-            # Fix any bytearray data type issues
-            if isinstance(dev_id, (bytearray, bytes)) and len(dev_id) > 0:
-                dev_id_int = dev_id[0]
-                self.pending_sio_command = [dev_id_int]
-                log_trace(f"NetSIOHub.handle_host_msg: Stored and fixed SIO DevID 0x{dev_id_int:02X}")
-            else:
-                self.pending_sio_command = [dev_id]
-                log_trace(f"NetSIOHub.handle_host_msg: Stored SIO DevID 0x{dev_id:02X}")
-            
-            # Forward original COMMAND_ON message to maintain signal timing
-            self.device_manager.to_peripheral(msg)
-            return
-        elif msg.id == NETSIO_DATA_BLOCK:
-            if self.pending_sio_command is not None and len(self.pending_sio_command) == 1:
-                # We have DevID, now get Cmd, Aux1, Aux2
-                # Expecting data = [Cmd, Aux1, Aux2]
-                if msg.arg and len(msg.arg) == 3:
-                    cmd, aux1, aux2 = msg.arg[0], msg.arg[1], msg.arg[2]
-                    self.pending_sio_command.extend([cmd, aux1, aux2])
-                    log_trace(f"NetSIOHub.handle_host_msg: Stored SIO Cmd=0x{cmd:02X}, Aux1=0x{aux1:02X}, Aux2=0x{aux2:02X}")
-                    
-                    # Forward original DATA_BLOCK message to maintain signal timing
-                    self.device_manager.to_peripheral(msg)
-                    return
-                else:
-                    log_warning(f"NetSIOHub.handle_host_msg: Received DATA_BLOCK with unexpected data length {len(msg.arg) if msg.arg else 0} during SIO command reconstruction. Discarding.")
-                    self.pending_sio_command = None # Reset state
-                    # Forward message anyway since we're breaking the sequence
-                    self.device_manager.to_peripheral(msg)
-                    return
-            else:
-                # DATA_BLOCK received out of sequence, treat as normal message
-                log_trace(f"NetSIOHub.handle_host_msg: Received DATA_BLOCK outside SIO sequence.")
-                if self.pending_sio_command is not None:
-                    log_trace(f"NetSIOHub.handle_host_msg: Resetting pending SIO command state.")
-                    self.pending_sio_command = None # Reset state
-                # Fall through to default forwarding
-        elif self.pending_sio_command is not None:
-            # Received a different message while waiting for DATA_BLOCK or COMMAND_OFF_SYNC
-            log_warning(f"NetSIOHub.handle_host_msg: Received unexpected message ID=0x{msg.id:02X} during SIO command reconstruction. Resetting state.")
-            self.pending_sio_command = None # Reset state
-            # Fall through to default forwarding
-        # --- End SIO Command Reconstruction Logic ---
-
-        # Default behavior: Forward non-SIO-sequence messages immediately
-        log_trace(f"NetSIOHub.handle_host_msg: Forwarding message ID=0x{msg.id:02X} to peripherals")
+        # send message down to connected peripherals
         self.device_manager.to_peripheral(msg)
 
-        # Original logging/handling logic (commented out for SIO reconstruction)
-        # if msg.id == NETSIO_COMMAND_ON:
-        #     log_trace(f"NetSIOHub.handle_host_msg: COMMAND_ON for device 0x{msg.arg:02X}")
-        #     self.to_peripheral(msg)
-        # elif msg.id == NETSIO_DATA_BLOCK:
-        #     if isinstance(msg.arg, bytes) or isinstance(msg.arg, bytearray):
-        #          log_trace(f"NetSIOHub.handle_host_msg: DATA_BLOCK with data: {' '.join(f'{b:02X}' for b in msg.arg)}")
-        #          # Check if it looks like an SIO command block (4 bytes: Dev, Cmd, Aux1, Aux2)
-        #          if len(msg.arg) == 5:
-        #              log_sio_command(msg.arg[0], msg.arg[1], msg.arg[2], msg.arg[3], msg.arg[4])
-        #     self.to_peripheral(msg)
-        # elif msg.id == NETSIO_COMMAND_OFF_SYNC:
-        #     # Log forwarding of COMMAND_OFF_SYNC, including payload (checksum)
-        #     checksum_val = msg.arg[0] if isinstance(msg.arg, list) and len(msg.arg) > 0 else None
-        #     sync_num = msg.arg[1] if isinstance(msg.arg, list) and len(msg.arg) > 1 else None
-        #     checksum_str = f"0x{checksum_val:02X}" if checksum_val is not None else 'N/A'
-        #     log_trace(f"NetSIOHub.handle_host_msg: Forwarding COMMAND_OFF_SYNC (SyncNum={sync_num}, Checksum={checksum_str})")
-        #     self.to_peripheral(msg)
-        # # Add other message types if needed
-        # else:
-        #     log_trace(f"NetSIOHub.handle_host_msg: Forwarding unhandled message ID=0x{msg.id:02X}")
-        #     self.to_peripheral(msg)
-        
     def handle_host_msg_sync(self, msg:NetSIOMsg) ->int:
         """handle message from Atari host emulator, emulation is paused, emulator is waiting for reply"""
-        log_trace(f"NetSIOHub.handle_host_msg_sync: Received sync message ID=0x{msg.id:02X}")
-
-        # --- SIO Command Reconstruction Logic ---
-        if msg.id == NETSIO_COMMAND_OFF_SYNC:
-            if self.pending_sio_command is not None and len(self.pending_sio_command) == 4:
-                # We have DevID, Cmd, Aux1, Aux2. Now get Checksum.
-                checksum = msg.arg[0] if isinstance(msg.arg, (list, bytearray, bytes)) and len(msg.arg) > 0 else None
-                original_sync_num = msg.arg[1] if isinstance(msg.arg, (list, bytearray, bytes)) and len(msg.arg) > 1 else None # Original SN from emulator
-
-                if checksum is not None:
-                    self.pending_sio_command.append(checksum)
-                    
-                    # Create a proper SIO frame from our collected data
-                    # Ensure all items are integers for bytes() conversion
-                    sio_frame = []
-                    for item in self.pending_sio_command:
-                        if isinstance(item, (bytearray, bytes)):
-                            if len(item) > 0:
-                                sio_frame.append(item[0])
-                            else:
-                                sio_frame.append(0)
-                        else:
-                            sio_frame.append(item)
-                    
-                    # Convert to bytes for logging
-                    sio_frame_bytes = bytes(sio_frame)
-                    log_trace(f"NetSIOHub.handle_host_msg_sync: Reconstructed SIO Frame: {' '.join(f'{b:02X}' for b in sio_frame_bytes)}")
-                    
-                    # Reset state *before* sending to avoid state corruption
-                    self.pending_sio_command = None 
-                    
-                    # Set up the sync request for the original message
-                    sync_sn = self.sync.set_request(msg.id)
-                    log_trace(f"NetSIOHub.handle_host_msg_sync: Set sync request SN={sync_sn} for COMMAND_OFF_SYNC.")
-                    
-                    clear_queue(self.host_queue) # Clear queue before sync wait
-                    if not self.device_manager.connected():
-                        log_warning(f"NetSIOHub.handle_host_msg_sync: No device connected during SIO sync. Returning NAK.")
-                        self.sync.set_response(ATDEV_NAK_RESPONSE, sync_sn) # Peripheral disconnected
-                    else:
-                        # Forward the original COMMAND_OFF_SYNC to maintain proper signal timing
-                        log_trace(f"NetSIOHub.handle_host_msg_sync: Forwarding original COMMAND_OFF_SYNC to peripheral.")
-                        self.device_manager.to_peripheral(msg)
-
-                    log_trace(f"NetSIOHub.handle_host_msg_sync: Waiting for SIO sync response (timeout={self.device_manager.sync_tmout}s)")
-                    result = self.sync.get_response(self.device_manager.sync_tmout, ATDEV_NAK_RESPONSE) # Default to NAK on timeout
-                    log_trace(f"NetSIOHub.handle_host_msg_sync: Got SIO sync response: 0x{result:02X}. Returning to host.")
-                    return result
-                else:
-                    log_warning(f"NetSIOHub.handle_host_msg_sync: Received COMMAND_OFF_SYNC with invalid checksum data during SIO reconstruction. Resetting state.")
-                    self.pending_sio_command = None # Reset state
-                    return ATDEV_NAK_RESPONSE # Indicate error to emulator
-            else:
-                # COMMAND_OFF_SYNC received out of sequence
-                log_warning(f"NetSIOHub.handle_host_msg_sync: Received COMMAND_OFF_SYNC outside expected SIO sequence. Resetting state and returning NAK.")
-                if self.pending_sio_command is not None:
-                    log_trace(f"NetSIOHub.handle_host_msg_sync: Pending command state was: {self.pending_sio_command}")
-                    self.pending_sio_command = None # Reset state
-                return ATDEV_NAK_RESPONSE # Indicate error to emulator
-        # --- End SIO Command Reconstruction Logic ---
-
-        # Handle DATA_BYTE_SYNC message
-        if msg.id == NETSIO_DATA_BYTE_SYNC:
-            log_trace(f"NetSIOHub.handle_host_msg_sync: DATA_BYTE_SYNC with value: 0x{msg.arg:02X}")
-            sync_sn = self.sync.set_request(msg.id)
-            log_trace(f"NetSIOHub.handle_host_msg_sync: Set sync request SN={sync_sn} for DATA_BYTE_SYNC.")
-            clear_queue(self.host_queue)
-            if not self.device_manager.connected():
-                self.sync.set_response(ATDEV_EMPTY_SYNC, sync_sn)
-            else:
-                self.device_manager.to_peripheral(msg) # Forward original message
-            result = self.sync.get_response(self.device_manager.sync_tmout, ATDEV_EMPTY_SYNC)
-            log_trace(f"NetSIOHub.handle_host_msg_sync: Got DATA_BYTE_SYNC response: 0x{result:02X}. Returning to host.")
-            return result
-
-        # Default for unexpected sync messages
-        log_warning(f"NetSIOHub.handle_host_msg_sync: Unhandled sync message ID=0x{msg.id:02X}. Returning NAK.")
-        return ATDEV_NAK_RESPONSE # Indicate error
+        if msg.id == NETSIO_DATA_BLOCK:
+            self.handle_host_msg(msg) # send to devices
+            return ATDEV_EMPTY_SYNC # return no ACK byte
+        # handle sync request
+        msg.arg.append(self.sync.set_request(msg.id)) # append request sn prior sending
+        clear_queue(self.host_queue)
+        if not self.device_manager.connected():
+            # shortcut: no device is connected, set response now
+            self.sync.set_response(ATDEV_EMPTY_SYNC, self.sync.sn) # no ACK byte
+        else:
+            self.handle_host_msg(msg) # send to devices
+        result = self.sync.get_response(self.device_manager.sync_tmout, ATDEV_EMPTY_SYNC)
+        return result
 
     def handle_device_msg(self, msg:NetSIOMsg, device:NetSIOClient):
-        pass
+        """handle message from peripheral device"""
+        if not self.host_ready.is_set():
+            # discard, host is not connected
+            return
 
-    def handle_device_msg_sync(self, msg:NetSIOMsg, device:NetSIOClient) -> int:
-        pass
+        # handle sync request/response
+        req, sn = self.sync.check_request()
+        if req is not None:
+            if msg.id == NETSIO_SYNC_RESPONSE and msg.arg[0] == sn:
+                # we received response to current SYNC request
+                if msg.arg[1] == NETSIO_EMPTY_SYNC:
+                    # empty response, no ACK/NAK
+                    self.sync.set_response(ATDEV_EMPTY_SYNC, sn) # no ACK byte
+                else:
+                    # response with ACK/NAK byte and sync write size
+                    self.host_handler.clear_rtr()
+                    self.sync.set_response(NETSIO_SYNC_RESPONSE |
+                                           msg.arg[2] << 8 | (msg.arg[3] << 16) | (msg.arg[4] << 24), sn)
+                return
+            elif msg.id in (NETSIO_DATA_BYTE, NETSIO_DATA_BLOCK):
+                debug_print("discarding", msg)
+                return
+            else:
+                debug_print("passed", msg)
 
-# Main function that will be called by the __main__.py script
+        if msg.id == NETSIO_SYNC_RESPONSE and msg.arg[1] != NETSIO_EMPTY_SYNC:
+            # TODO 
+            # host is not interested into this sync response
+            # but there is a byte inside response, deliver it as normal byte to host ...
+            debug_print("replace", msg)
+            msg.id = NETSIO_DATA_BYTE
+            msg.arg = bytes( (msg.arg[2],) )
+
+        if self.host_queue.full():
+            debug_print("host queue FULL")
+        else:
+            debug_print("host queue [{}]".format(self.host_queue.qsize()))
+
+        self.host_queue.put(msg)
+
+    def credit_clients(self):
+        self.device_manager.credit_clients()
+
+# workaround for calling parse_args() twice
+def get_arg_parser(full=True):
+    arg_parser = argparse.ArgumentParser(description = 
+            "Connects NetSIO protocol (SIO over UDP) talking peripherals with "
+            "NetSIO Altirra custom device (localhost TCP).")
+    port_grp = arg_parser.add_mutually_exclusive_group()
+    port_grp.add_argument('--netsio-port', type=int, default=NETSIO_PORT,
+        help='Change UDP port used by NetSIO peripherals (default {})'.format(NETSIO_PORT))
+    #serial_grp = port_grp.add_argument_group("Serial port")
+    port_grp.add_argument('--serial',
+        help='Switch to serial port mode. Specify serial port (device) to use for communication with peripherals.')
+    arg_parser.add_argument('--command', default='RTS', choices=['RTS','DTR'],
+        help='Specify how is COMMAND signal connected, value can be RTS (default) or DTR')
+    arg_parser.add_argument('--proceed', default='CTS', choices=['CTS','DSR'],
+        help='Specify how is PROCEED signal connected, value can be CTS (default) or DSR')
+    arg_parser.add_argument('-d', '--debug', dest='debug', action='store_true', help='Print debug output')
+    if full:
+        arg_parser.add_argument('--port', type=int, default=NETSIO_ATDEV_PORT,
+            help='Change TCP port used by Altirra NetSIO custom device (default {})'.format(NETSIO_ATDEV_PORT))
+        arg_parser.add_argument('-v', '--verbose', dest='verbose', action='store_true',
+            help='Log emulation device commands')
+    return arg_parser
+
+
 def main():
-    """Main function when run as module"""
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='NetSIO Hub for Atari800 emulator and peripherals')
-    parser.add_argument('--tcp-host', dest='tcp_host', default='127.0.0.1',
-                        help='TCP host address for Atari800 emulator (default: 127.0.0.1)')
-    parser.add_argument('--tcp-port', dest='tcp_port', type=int, default=9996,
-                        help='TCP port for Atari800 emulator (default: 9996)')
-    parser.add_argument('--udp-host', dest='udp_host', default='0.0.0.0',
-                        help='UDP host address for peripheral devices (default: 0.0.0.0)')
-    parser.add_argument('--udp-port', dest='udp_port', type=int, default=9997,
-                        help='UDP port for peripheral devices (default: 9997)')
-    
-    # Initialize global constants if needed
-    global NETSIO_ATDEV_PORT
-    NETSIO_ATDEV_PORT = 9996  # Default TCP port
-    
-    # Create managers
-    device_manager = NetSIOManager()
-    host_manager = AtDevManager(parser)
-    
-    # Create hub
+    print("__file__:", __file__)
+    print("sys.executable:", sys.executable)
+    print("sys.version:", sys.version)
+    print("sys.path:")
+    print("\n".join(sys.path))
+    print("sys.argv", sys.argv)
+
+    print_banner()
+
+    socketserver.TCPServer.allow_reuse_address = True
+    args = get_arg_parser().parse_args()
+
+    if args.debug:
+        enable_debug()
+
+    # get device manager (to talk to peripheral device)
+    if args.serial:
+        if has_serial:
+            device_manager = SerialSIOManager(args.serial, args.command, args.proceed)
+        else:
+            print("pySerial module was not found. To install pySerial module run 'python -m pip install pyserial'.")
+            return -1
+    else:
+        device_manager = NetSIOManager(args.netsio_port)
+
+    # get host manager (to talk to Atari host emulator)
+    host_manager = AtDevManager(get_arg_parser(False))
+
+    # hub for host <-> devices communication
     hub = NetSIOHub(device_manager, host_manager)
-    
-    # Run the hub
+
     try:
         hub.run()
-        
-        # Wait for KeyboardInterrupt
-        while True:
-            time.sleep(1)
     except KeyboardInterrupt:
-        info_print("Received KeyboardInterrupt, shutting down")
-    
-if __name__ == '__main__':
-    main()
+        print("\nStopped from keyboard")
+
+    return 0

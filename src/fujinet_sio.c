@@ -140,9 +140,10 @@ UBYTE FujiNet_SIO_ProcessCommand(const UBYTE *command_frame) {
             }
         }
         
-        /* Short delay between messages */
-        struct timespec ts = {0, 10000000}; /* 10ms */
-        nanosleep(&ts, NULL);
+        /* Cascade Change: Remove sleep */
+        /* struct timespec ts = {0, 10000000}; // 10ms */
+        /* nanosleep(&ts, NULL); */
+        /* End Cascade Change */
         
         /* Step 2: Send DATA_BLOCK with command, aux1, aux2 */
         uint8_t data_block[3] = {command, aux1, aux2};
@@ -157,8 +158,10 @@ UBYTE FujiNet_SIO_ProcessCommand(const UBYTE *command_frame) {
             }
         }
         
+        /* Cascade Change: Remove sleep */
         /* Another short delay between messages */
-        nanosleep(&ts, NULL);
+        /* nanosleep(&ts, NULL); */
+        /* End Cascade Change */
         
         /* Step 3: Send COMMAND_OFF_SYNC with sync request counter and checksum */
         /* The sync request counter is necessary for the NetSIO protocol to pause/resume emulation */
@@ -199,17 +202,6 @@ UBYTE FujiNet_SIO_ProcessCommand(const UBYTE *command_frame) {
     fujinet_response_buffer_size = 0;
     memset(fujinet_response_buffer, 0, FUJINET_BUFFER_SIZE);
 
-    /* Wait for SIO response from the NetSIO hub */
-    /* Hub sends SIO response bytes directly via DATA_BYTE, then a SYNC_RESPONSE */
-    SIO_LOG_DEBUG("Waiting for SIO response bytes from NetSIO hub...");
-
-    /* Actively poll for responses from the NetSIO hub */
-    struct timeval start_time, current_time;
-    gettimeofday(&start_time, NULL);
-    int timeout_ms = 1000; /* 1 second timeout */
-    int first_byte_received = 0;
-    uint8_t response_byte;
-
     /* Determine expected SIO response size based on command */
     int is_read_command = 0;
     int expected_data_bytes = 0;
@@ -240,86 +232,55 @@ UBYTE FujiNet_SIO_ProcessCommand(const UBYTE *command_frame) {
     }
     SIO_LOG_DEBUG("Expecting %d total SIO response bytes for command 0x%02X", expected_data_bytes, command);
 
-    /* --- Main loop to receive SIO response bytes --- */
+    /* --- Cascade: Loop to receive SIO response bytes using Network_GetByte --- */
+    SIO_LOG_DEBUG("Receiving SIO response bytes from NetSIO hub...");
+    uint8_t received_byte;
+    int get_byte_result;
+
     while (fujinet_response_buffer_size < expected_data_bytes) {
-        /* Check for timeout */
-        gettimeofday(&current_time, NULL);
-        long elapsed_ms = ((current_time.tv_sec - start_time.tv_sec) * 1000) +
-                          ((current_time.tv_usec - start_time.tv_usec) / 1000);
+        get_byte_result = Network_GetByte(&received_byte);
 
-        if (elapsed_ms >= timeout_ms) {
-            SIO_LOG_ERROR("Timeout waiting for SIO response bytes (%d/%d received)",
-                           fujinet_response_buffer_size, expected_data_bytes);
-            /* If we never got the first byte, it's a hard fail (NAK) */
-            /* If we got some bytes, return COMPLETE but warn */
-            if (fujinet_response_buffer_size == 0) return FUJINET_SIO_ERROR_NAK;
-            SIO_LOG_WARN("Returning partial data.");
-            fujinet_response_buffer_pos = 0; // Ensure reading starts from beginning
-            return FUJINET_SIO_COMPLETE; 
-        }
-
-        /* Actively process multiple messages from the network */
-        int message_processed = 0;
-        for (int i = 0; i < 10; i++) { 
-            int result = Network_ProcessAltirraMessage();
-            
-            if (result > 0) { // Data was added to buffer by Network_ProcessAltirraMessage
-                message_processed = 1;
-                /* Try to get bytes added to the buffer */
-                while (fujinet_response_buffer_size < expected_data_bytes && Network_GetByte(&response_byte)) {
-                    // Store the byte
-                    fujinet_response_buffer[fujinet_response_buffer_pos++] = response_byte;
-                    fujinet_response_buffer_size++;
-
-                    SIO_LOG_DEBUG("Received SIO byte %d: 0x%02X (buffer size %d/%d)", 
-                                  fujinet_response_buffer_size, response_byte, fujinet_response_buffer_size, expected_data_bytes);
-
-                    /* Check ONLY the FIRST byte for NAK */
-                    if (fujinet_response_buffer_size == 1) {
-                        first_byte_received = 1;
-                        if (response_byte == 0x4E) {
-                            SIO_LOG_WARN("First SIO response byte is NAK (0x4E)");
-                            return FUJINET_SIO_ERROR_NAK;
-                        }
-                        SIO_LOG_DEBUG("First SIO byte 0x%02X is not NAK, proceeding...", response_byte);
-                    }
-                    
-                    gettimeofday(&start_time, NULL); // Reset timeout after receiving a byte
-                    message_processed = 1;
-                }
-                if (fujinet_response_buffer_size >= expected_data_bytes) break; // Exit inner loop if done
-            } else if (result < 0) {
-                SIO_LOG_ERROR("Network error while waiting for SIO response");
-                return FUJINET_SIO_ERROR_NAK;
+        if (get_byte_result == 1) {
+            /* Successfully received a byte */
+            if (fujinet_response_buffer_size < FUJINET_BUFFER_SIZE) {
+                fujinet_response_buffer[fujinet_response_buffer_size++] = received_byte;
+                SIO_LOG_DEBUG("Received SIO byte 0x%02X (%d/%d)", 
+                              received_byte, fujinet_response_buffer_size, expected_data_bytes);
+            } else {
+                SIO_LOG_WARN("FujiNet response buffer overflow! Discarding byte 0x%02X", received_byte);
+                /* Continue trying to receive the rest to clear the network buffer, but flag error later */
             }
-        } // End inner message processing loop
-
-        if (fujinet_response_buffer_size >= expected_data_bytes) {
-            break; // Exit outer loop if done
+        } else {
+            /* get_byte_result is 0 (timeout/error) or -1 (should not happen) */
+            if (!Network_IsConnected()) {
+                 SIO_LOG_ERROR("Network disconnected while waiting for SIO response");
+            } else {
+                 SIO_LOG_ERROR("Timeout or error waiting for SIO response byte (%d/%d received)", 
+                               fujinet_response_buffer_size, expected_data_bytes);
+            }
+            break; /* Exit the loop on timeout or error */
         }
+    }
 
-        /* Small sleep if no message was processed in the inner loop */
-        if (!message_processed) {
-             usleep(5000); /* 5ms sleep */
-        }
-    } // End while loop waiting for all bytes
-
-    /* Check if we received all expected SIO response bytes */
+    /* Check if we received the expected amount */
     if (fujinet_response_buffer_size < expected_data_bytes) {
-        SIO_LOG_WARN("Did not receive all expected SIO bytes (%d/%d)", fujinet_response_buffer_size, expected_data_bytes);
-        // Still return COMPLETE, but the caller needs to handle potential short data
-    }
-    else {
-         SIO_LOG_DEBUG("Received all expected SIO response bytes (%d total)", fujinet_response_buffer_size);
+        SIO_LOG_ERROR("Incomplete SIO response: Received %d bytes, expected %d", 
+                      fujinet_response_buffer_size, expected_data_bytes);
+        return FUJINET_SIO_ERROR; /* Return error if response incomplete */
     }
 
-    /* Reset the response buffer read position for subsequent reads by SIO_GetByte */
-    /* SIO response should start from index 0 */
-    fujinet_response_buffer_pos = 0;
-    SIO_LOG_DEBUG("Setting response buffer pos to 0");
+    /* Check for buffer overflow during receive */
+    if (fujinet_response_buffer_size >= FUJINET_BUFFER_SIZE && expected_data_bytes >= FUJINET_BUFFER_SIZE) {
+         SIO_LOG_ERROR("FujiNet response buffer overflow occurred during receive.");
+         return FUJINET_SIO_ERROR;
+    }
 
-    /* Return success */
-    return FUJINET_SIO_COMPLETE;
+    SIO_LOG_DEBUG("Full SIO response received (%d bytes). First byte (status): 0x%02X", 
+                  fujinet_response_buffer_size, fujinet_response_buffer[0]);
+
+    /* Return the first byte, which is the SIO status code (ACK/NAK/COMPLETE/ERROR) */
+    return fujinet_response_buffer[0];
+    /* --- End Cascade Changes --- */
 }
 
 /*

@@ -215,7 +215,7 @@ int Network_Initialize(const char *host_port) {
 }
 
 void Network_Shutdown(void) {
-    NETWORK_LOG_DEBUG("Network_Shutdown called");
+    NETWORK_LOG_DEBUG("Network shutdown");
     
     if (network_connected) {
         /* No need to send a RESET command during normal operation */
@@ -234,6 +234,22 @@ int Network_IsConnected(void) {
 
 /* Send raw data over TCP, ensuring all bytes are sent */
 int Network_SendData(const uint8_t *data, int data_len) {
+    // --- Add Logging Start ---
+    if (data_len > 0) {
+        char hex_preview[40] = {0}; // Buffer for hex preview
+        int preview_len = data_len < 8 ? data_len : 8; // Show up to 8 bytes
+        for (int i = 0; i < preview_len; ++i) {
+            snprintf(hex_preview + i*3, 4, "%02X ", data[i]);
+        }
+        // Remove trailing space if any
+        if (preview_len > 0) hex_preview[preview_len*3 - 1] = '\0'; 
+
+        NETWORK_LOG_DEBUG("Network_SendData: Sending %d bytes starting with: %s", data_len, hex_preview);
+    } else {
+        NETWORK_LOG_DEBUG("Network_SendData: Called with 0 bytes");
+    }
+    // --- Add Logging End ---
+    
     int total_sent = 0;
     int sent;
     
@@ -241,20 +257,6 @@ int Network_SendData(const uint8_t *data, int data_len) {
         NETWORK_LOG_ERROR("Attempted to send data while not connected.");
         return 0;
     }
-
-#ifdef DEBUG_FUJINET
-    /* Debug log for hex dump of data being sent */
-    char hex_buffer[100] = "";
-    int len_to_log = data_len < 16 ? data_len : 16; /* Limit data dump to first 16 bytes */
-    int i;
-    
-    for (i = 0; i < len_to_log; i++) {
-        sprintf(hex_buffer + i * 3, "%02X ", data[i]);
-    }
-    if (len_to_log > 0) hex_buffer[len_to_log * 3 - 1] = '\0'; else hex_buffer[0] = '\0'; /* Trim trailing space */
-    NETWORK_LOG_DEBUG("send_tcp_data: Sending %d bytes, starting with: %s%s", 
-                       len_to_log, hex_buffer, len_to_log < data_len ? "..." : "");
-#endif
 
     while (total_sent < data_len) {
         sent = send(tcp_socket, (const char *)(data + total_sent), data_len - total_sent, 0);
@@ -333,52 +335,63 @@ int Network_ReadExactBytes(uint8_t *buffer, int buffer_size, int *received_len) 
 }
 
 /* Send a message in the Altirra NetSIO Custom Protocol format */
-int Network_SendAltirraMessage(uint8_t event, uint8_t arg, const uint8_t *data, int data_len) {
-    /* Message format:
-       - 8-byte header:
-           - Bytes 0-3: Total length (header + payload) as little-endian 32-bit int
-           - Bytes 4-7: Timestamp (using 0)
-       - Payload:
-           - Byte 8: Event ID
-           - Byte 9: Argument byte
-           - Bytes 10+: Optional data */
-    
-    /* Calculate total message length: header (8) + event (1) + arg (1) + data */
-    uint32_t total_length = 8 + 2 + (data ? data_len : 0);
-    
-    /* Allocate a buffer for the complete message */
-    uint8_t *message = (uint8_t*)malloc(total_length);
-    if (!message) {
-        NETWORK_LOG_ERROR("Failed to allocate memory for Altirra message");
+int Network_SendAltirraMessage(uint8_t event, uint8_t arg, const uint8_t *data, uint16_t data_len) {
+    uint8_t altirra_packet[17];
+    uint32_t packet_id = event; // Use the event code itself as the packet ID
+    uint32_t param1 = 0;     // Set param1 to 0
+    uint32_t param2 = arg;
+    uint32_t timestamp = 0;
+
+    if (!network_connected || tcp_socket == INVALID_SOCKET) {
+        NETWORK_LOG_ERROR("Network not connected for sending message");
         return 0;
     }
-    
-    /* Build the header */
-    /* Convert total length to little-endian and set timestamp to 0 */
-    *(uint32_t*)message = to_little_endian(total_length);
-    *(uint32_t*)(message + 4) = 0; /* Zero timestamp */
-    
-    /* Set event ID and argument */
-    message[8] = event;
-    message[9] = arg;
-    
-    /* Copy payload data if present */
-    if (data && data_len > 0) {
-        memcpy(message + 10, data, data_len);
-    }
-    
-    NETWORK_LOG_DEBUG("Sending Altirra message: Event=0x%02X, Arg=0x%02X, TotalLen=%d", 
-                      event, arg, total_length);
-    
-    /* Send the complete message in a single network operation */
-    int success = Network_SendData(message, total_length);
-    free(message);
-    
-    if (!success) {
-        NETWORK_LOG_ERROR("Failed to send Altirra message");
+
+    NETWORK_LOG_DEBUG("Sending Altirra message: Cmd=0x%02X, Event(P1)=0x%08X, Arg(P2)=0x%08X, DataLen=%u",
+                      packet_id, param1, param2, data_len);
+
+    /* Format 17-byte Altirra packet (little-endian) */
+    altirra_packet[0] = packet_id; // Command ID
+
+    // Param1 (now 0) - Little Endian
+    altirra_packet[1] = (param1 >> 0) & 0xFF;
+    altirra_packet[2] = (param1 >> 8) & 0xFF;
+    altirra_packet[3] = (param1 >> 16) & 0xFF;
+    altirra_packet[4] = (param1 >> 24) & 0xFF;
+
+    // Param2 (arg) - Little Endian
+    altirra_packet[5] = (param2 >> 0) & 0xFF;
+    altirra_packet[6] = (param2 >> 8) & 0xFF;
+    altirra_packet[7] = (param2 >> 16) & 0xFF;
+    altirra_packet[8] = (param2 >> 24) & 0xFF;
+
+    // Timestamp (0) - Little Endian
+    altirra_packet[9]  = (timestamp >> 0)  & 0xFF;
+    altirra_packet[10] = (timestamp >> 8)  & 0xFF;
+    altirra_packet[11] = (timestamp >> 16) & 0xFF;
+    altirra_packet[12] = (timestamp >> 24) & 0xFF;
+    altirra_packet[13] = (timestamp >> 32) & 0xFF;
+    altirra_packet[14] = (timestamp >> 40) & 0xFF;
+    altirra_packet[15] = (timestamp >> 48) & 0xFF;
+    altirra_packet[16] = (timestamp >> 56) & 0xFF;
+
+    /* Send 17-byte Altirra command packet */
+    if (!Network_SendData(altirra_packet, 17)) {
+        NETWORK_LOG_ERROR("Failed to send Altirra command packet");
         return 0;
     }
-    
+    NETWORK_LOG_DEBUG("Sent 17-byte Altirra command packet");
+
+    /* Send data payload if it exists */
+    if (data != NULL && data_len > 0) {
+        if (!Network_SendData(data, data_len)) {
+            NETWORK_LOG_ERROR("Failed to send Altirra message data payload (%u bytes)", data_len);
+            return 0;
+        }
+        NETWORK_LOG_DEBUG("Sent %u bytes of Altirra data payload", data_len);
+    }
+
+    NETWORK_LOG_DEBUG("Altirra message sent successfully");
     return 1; /* Success */
 }
 
@@ -486,9 +499,9 @@ int Network_ProcessAltirraMessage(void) {
              */
             NETWORK_LOG_DEBUG("Received SYNC_RESPONSE (0x81) for sync #%d", (unsigned int)arg);
             
-            /* Check if this is the sync response we're waiting for */
-            if (Network_IsWaitingForSync() && arg == Network_GetWaitingSyncNum()) {
-                NETWORK_LOG_DEBUG("Received matching sync response, resuming CPU execution");
+            /* Clear waiting-for-sync regardless of arg match (hub may not echo sync #) */
+            if (Network_IsWaitingForSync()) {
+                NETWORK_LOG_DEBUG("Received SYNC_RESPONSE while waiting, clearing wait state");
                 Network_ClearWaitingForSync();
             }
             
@@ -502,11 +515,10 @@ int Network_ProcessAltirraMessage(void) {
                     NETWORK_LOG_WARN("RX buffer full! Discarding ACK/NAK byte 0x%02X", payload[0]);
                 }
             } else {
-                /* If no payload, use arg as the ACK/NAK byte (based on our observation of logs) */
-                NETWORK_LOG_WARN("Received SYNC_RESPONSE with no payload, using default ACK");
+                /* If no payload, treat ARG as the ACK/NAK byte (hub sends it this way) */
+                NETWORK_LOG_DEBUG("SYNC_RESPONSE without payload; using ARG (0x%02X) as ACK/NAK", arg);
                 if (network_rx_len < FUJINET_BUFFER_SIZE) {
-                    /* For Altirra protocol from NetSIO hub, 'A' (0x41) is ACK, 'N' (0x4E) is NAK */
-                    network_rx_buffer[network_rx_len++] = 0x41; /* Default to ACK */
+                    network_rx_buffer[network_rx_len++] = arg;
                 }
             }
             

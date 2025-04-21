@@ -48,6 +48,7 @@ extern "C" {
 /* --- Altirra NetSIO protocol constants --- */
 /* Event types in the Altirra protocol */
 #define NETSIO_DATA_BYTE        0x01
+#define NETSIO_DATA_BYTE_SYNC   0x09
 #define NETSIO_DATA_BLOCK       0x02
 #define NETSIO_COMMAND_ON       0x11
 #define NETSIO_COMMAND_OFF_SYNC 0x18
@@ -62,7 +63,7 @@ int Network_IsConnected(void);
 int Network_SendData(const uint8_t *data, int len);
 int Network_GetByte(uint8_t *byte);
 int Network_PutByte(uint8_t byte);
-int Network_SendAltirraMessage(uint8_t event, uint8_t arg, const uint8_t *data, int data_len);
+int Network_SendAltirraMessage(uint8_t event, uint8_t arg, const uint8_t *data, uint16_t data_len);
 uint8_t Network_GetSyncCounter(void);
 
 /* NetSIO synchronization functions */
