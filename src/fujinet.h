@@ -31,6 +31,7 @@ UBYTE FujiNet_ProcessCommand(const UBYTE *command_frame);
 int FujiNet_GetByte(uint8_t *byte);
 int FujiNet_PutByte(uint8_t byte);
 void FujiNet_SetMotorState(int on);
+void FujiNet_Process(void);
 
 /* Global variable declarations */
 extern int fujinet_enabled;

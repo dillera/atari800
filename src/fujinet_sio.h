@@ -38,6 +38,8 @@ extern "C" {
 /* SIO command response codes */
 #define SIO_COMMAND_ACCEPTED 0x01  /* Command was accepted and sent to NetSIO hub */
 #define FUJINET_SIO_ERROR    0xFF  /* Error sending command to NetSIO hub */
+#define FUJINET_SIO_ACK      0x01  /* Command acknowledged (ACK) */
+#define FUJINET_SIO_NAK      0x02  /* Command not acknowledged (NAK) */
 
 /* Legacy FujiNet SIO response codes - kept for reference */
 #define FUJINET_SIO_COMPLETE      0x01  /* Command completed, no error */

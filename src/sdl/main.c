@@ -201,6 +201,10 @@ int main(int argc, char **argv)
 		}
 #endif
 		SDL_INPUT_Mouse();
+#ifdef USE_FUJINET
+		/* Process FujiNet messages */
+		FujiNet_Process();
+#endif
 		Atari800_Frame();
 		if (Atari800_display_screen)
 			PLATFORM_DisplayScreen();

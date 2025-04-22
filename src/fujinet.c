@@ -29,7 +29,7 @@
 
 #include "config.h"
 #include "fujinet.h"
-#include "fujinet_network.h"
+#include "fujinet_netsio.h"
 #include "fujinet_sio.h"
 #include "log.h"
 #include "util.h"
@@ -48,9 +48,27 @@ int fujinet_enabled = 0;
 int FujiNet_Initialise(const char *host_port) {
     FUJINET_LOG("Initializing FujiNet device emulation");
     
-    /* Initialize the network module */
-    if (!Network_Initialize(host_port)) {
-        FUJINET_LOG("Failed to initialize network connection");
+    /* Parse host:port string */
+    char host[256] = "localhost";
+    int port = 9997; /* Default NetSIO UDP port */
+    
+    if (host_port && *host_port) {
+        char *colon = strchr(host_port, ':');
+        if (colon) {
+            size_t host_len = colon - host_port;
+            if (host_len >= sizeof(host)) host_len = sizeof(host) - 1;
+            strncpy(host, host_port, host_len);
+            host[host_len] = '\0';
+            port = atoi(colon + 1);
+        } else {
+            strncpy(host, host_port, sizeof(host) - 1);
+            host[sizeof(host) - 1] = '\0';
+        }
+    }
+    
+    /* Initialize the NetSIO module */
+    if (!FujiNet_NetSIO_Initialize(host, port)) {
+        FUJINET_LOG("Failed to initialize NetSIO connection");
         return 0;
     }
     
@@ -70,7 +88,7 @@ void FujiNet_Shutdown(void) {
     
     if (fujinet_enabled) {
         FujiNet_SIO_Shutdown();
-        Network_Shutdown();
+        FujiNet_NetSIO_Shutdown();
         fujinet_enabled = 0;
     }
 }
@@ -120,4 +138,16 @@ void FujiNet_SetMotorState(int on) {
     }
     
     FujiNet_SIO_SetMotorState(on);
+}
+
+/*
+ * Process FujiNet messages during emulator operation
+ */
+void FujiNet_Process(void) {
+    if (!fujinet_enabled) {
+        return;
+    }
+    
+    /* Process any incoming NetSIO messages */
+    FujiNet_NetSIO_ProcessMessages();
 }

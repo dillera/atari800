@@ -74,12 +74,18 @@ int Util_chrieq(char c1, char c2)
 	}
 }
 
-#ifdef __STRICT_ANSI__
+#ifdef HAVE_STRCASECMP
+#include <strings.h>
+int Util_stricmp(const char *str1, const char *str2) {
+    return strcasecmp(str1, str2);
+}
+#else
+#include <ctype.h>
 int Util_stricmp(const char *str1, const char *str2)
 {
 	int retval;
 
-	while((retval = tolower(*str1) - tolower(*str2++)) == 0)
+	while((retval = tolower((unsigned char)*str1) - tolower((unsigned char)*str2++)) == 0)
 	{
 		if (*str1++ == '\0')
 			break;

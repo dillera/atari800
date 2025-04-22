@@ -30,17 +30,12 @@
 
 #include "config.h"
 #include "fujinet.h"
-#include "fujinet_network.h"
+#include "fujinet_netsio.h"
 #include "fujinet_sio.h"
 #include "log.h"
 #include "util.h"
 #include "atari.h"
 #include "sio.h" /* For SIO command status codes */
-
-/* Response buffer for SIO commands */
-static UBYTE fujinet_response_buffer[FUJINET_BUFFER_SIZE];
-static int fujinet_response_buffer_pos = 0;
-static int fujinet_response_buffer_size = 0;
 
 /* Logging macros */
 #define SIO_LOG_ERROR(msg, ...) do { Log_print("FujiNet SIO ERROR: " msg, ##__VA_ARGS__); } while(0)
@@ -89,10 +84,6 @@ UBYTE FujiNet_SIO_ProcessCommand(const UBYTE *command_frame) {
     SIO_LOG_DEBUG("SIO_ProcessCommand called for device 0x%02X, cmd 0x%02X", 
                   command_frame[0], command_frame[1]);
 
-    /* In NetSIO protocol, we handle all device IDs, not just FujiNet device */
-    /* Reset receive buffers for new command */
-    /* Reset any status indicators */
-
     /* First, calculate and verify checksum before sending */
     UBYTE checksum = 0;
     for (int i = 0; i < 4; i++) {
@@ -105,182 +96,19 @@ UBYTE FujiNet_SIO_ProcessCommand(const UBYTE *command_frame) {
         /* Continue anyway - might be an intentional non-standard checksum */
     }
 
-    /* Get the components of the SIO command frame */
-    uint8_t devid = command_frame[0];
-    uint8_t command = command_frame[1];
-    uint8_t aux1 = command_frame[2];
-    uint8_t aux2 = command_frame[3];
-    uint8_t frame_checksum = command_frame[4];
+    /* Send the command to FujiNet via NetSIO */
+    int result = FujiNet_NetSIO_SendCommand(command_frame);
     
-    SIO_LOG_DEBUG("Sending SIO command frame for device 0x%02X (cmd=0x%02X, aux1=0x%02X, aux2=0x%02X, chksum=0x%02X)...",
-                devid, command, aux1, aux2, frame_checksum);
-    
-    /* Enhanced error handling for network send operation */
-    int send_attempts = 0;
-    int max_attempts = 3;
-    int success = 0;
-    
-    while (send_attempts < max_attempts && !success) {
-        send_attempts++;
-        
-        /* Follow NetSIO protocol sequence for SIO commands:
-           1. COMMAND_ON with device ID
-           2. DATA_BLOCK with command, aux1, aux2
-           3. COMMAND_OFF_SYNC with checksum and sync request counter */
-        
-        /* Step 1: Send COMMAND_ON with device ID */
-        if (!Network_SendAltirraMessage(NETSIO_COMMAND_ON, devid, NULL, 0)) {
-            if (send_attempts < max_attempts) {
-                SIO_LOG_WARN("Failed to send COMMAND_ON, retrying (attempt %d/%d)...", 
-                            send_attempts, max_attempts);
-                continue;
-            } else {
-                SIO_LOG_ERROR("Failed to send COMMAND_ON after %d attempts", max_attempts);
-                return FUJINET_SIO_ERROR;
-            }
-        }
-        
-        /* Cascade Change: Remove sleep */
-        /* struct timespec ts = {0, 10000000}; // 10ms */
-        /* nanosleep(&ts, NULL); */
-        /* End Cascade Change */
-        
-        /* Step 2: Send DATA_BLOCK with command, aux1, aux2 */
-        uint8_t data_block[3] = {command, aux1, aux2};
-        if (!Network_SendAltirraMessage(NETSIO_DATA_BLOCK, 3, data_block, 3)) {
-            if (send_attempts < max_attempts) {
-                SIO_LOG_WARN("Failed to send DATA_BLOCK, retrying entire sequence (attempt %d/%d)...", 
-                            send_attempts, max_attempts);
-                continue;
-            } else {
-                SIO_LOG_ERROR("Failed to send DATA_BLOCK after %d attempts", max_attempts);
-                return FUJINET_SIO_ERROR;
-            }
-        }
-        
-        /* Cascade Change: Remove sleep */
-        /* Another short delay between messages */
-        /* nanosleep(&ts, NULL); */
-        /* End Cascade Change */
-        
-        /* Step 3: Send COMMAND_OFF_SYNC with sync request counter and checksum */
-        /* The sync request counter is necessary for the NetSIO protocol to pause/resume emulation */
-        /* First, get the current counter value from the network module */
-        uint8_t sync_number = Network_GetSyncCounter();
-        
-        /* For COMMAND_OFF_SYNC, the sync number is the arg, and checksum is sent as payload */
-        if (!Network_SendAltirraMessage(NETSIO_COMMAND_OFF_SYNC, sync_number, &frame_checksum, 1)) {
-            if (send_attempts < max_attempts) {
-                SIO_LOG_WARN("Failed to send COMMAND_OFF_SYNC, retrying entire sequence (attempt %d/%d)...", 
-                            send_attempts, max_attempts);
-                continue;
-            } else {
-                SIO_LOG_ERROR("Failed to send COMMAND_OFF_SYNC after %d attempts", max_attempts);
-                return FUJINET_SIO_ERROR;
-            }
-        }
-        
-        /* After sending COMMAND_OFF_SYNC, set the waiting flag to pause CPU execution */
-        /* This is required by the NetSIO protocol to ensure proper timing for ACK/NAK responses */
-        Network_SetWaitingForSync(sync_number);
-        
-        /* All three messages sent successfully */
-        success = 1;
-    }
-    
-    if (!success) {
-        SIO_LOG_ERROR("Failed to send Altirra message for SIO command after %d attempts", max_attempts);
+    if (result == 1) {
+        /* Command accepted (ACK) */
+        return FUJINET_SIO_ACK;
+    } else if (result == 0) {
+        /* Command rejected (NAK) */
+        return FUJINET_SIO_NAK;
+    } else {
+        /* Error */
         return FUJINET_SIO_ERROR;
     }
-    
-    SIO_LOG_DEBUG("SIO command sent successfully");
-    
-    /* ------ RESPONSE HANDLING PHASE ------ */
-
-    /* First, reset the response buffer */
-    fujinet_response_buffer_pos = 0;
-    fujinet_response_buffer_size = 0;
-    memset(fujinet_response_buffer, 0, FUJINET_BUFFER_SIZE);
-
-    /* Determine expected SIO response size based on command */
-    int is_read_command = 0;
-    int expected_data_bytes = 0;
-    switch (command) {
-        case 0x52: /* 'R' Read Sector */
-            is_read_command = 1;
-            expected_data_bytes = 129; /* ACK/NAK + 128 data */
-            break;
-        case 0x53: /* 'S' Get Status */
-            is_read_command = 1;
-            expected_data_bytes = 129; /* Status 'C' byte + 128 data bytes */
-            break;
-        case 0x4E: /* 'N' Read Percom Block */
-            is_read_command = 1;
-            expected_data_bytes = 13; /* ACK/NAK + 12 data */
-            break;
-        case 0x50: /* 'P' Put Sector */
-        case 0x4F: /* 'O' Format Drive */
-        case 0x57: /* 'W' Write Sector */
-        case 0x21: /* '!' Format Drive (Non-FMS) */
-            is_read_command = 0; /* These expect ACK/NAK/COMPLETE only */
-            expected_data_bytes = 1;
-            break;
-        default:
-            /* Assume only ACK/NAK/COMPLETE */
-            is_read_command = 0;
-            expected_data_bytes = 1;
-    }
-    SIO_LOG_DEBUG("Expecting %d total SIO response bytes for command 0x%02X", expected_data_bytes, command);
-
-    /* --- Cascade: Loop to receive SIO response bytes using Network_GetByte --- */
-    SIO_LOG_DEBUG("Receiving SIO response bytes from NetSIO hub...");
-    uint8_t received_byte;
-    int get_byte_result;
-
-    while (fujinet_response_buffer_size < expected_data_bytes) {
-        get_byte_result = Network_GetByte(&received_byte);
-
-        if (get_byte_result == 1) {
-            /* Successfully received a byte */
-            if (fujinet_response_buffer_size < FUJINET_BUFFER_SIZE) {
-                fujinet_response_buffer[fujinet_response_buffer_size++] = received_byte;
-                SIO_LOG_DEBUG("Received SIO byte 0x%02X (%d/%d)", 
-                              received_byte, fujinet_response_buffer_size, expected_data_bytes);
-            } else {
-                SIO_LOG_WARN("FujiNet response buffer overflow! Discarding byte 0x%02X", received_byte);
-                /* Continue trying to receive the rest to clear the network buffer, but flag error later */
-            }
-        } else {
-            /* get_byte_result is 0 (timeout/error) or -1 (should not happen) */
-            if (!Network_IsConnected()) {
-                 SIO_LOG_ERROR("Network disconnected while waiting for SIO response");
-            } else {
-                 SIO_LOG_ERROR("Timeout or error waiting for SIO response byte (%d/%d received)", 
-                               fujinet_response_buffer_size, expected_data_bytes);
-            }
-            break; /* Exit the loop on timeout or error */
-        }
-    }
-
-    /* Check if we received the expected amount */
-    if (fujinet_response_buffer_size < expected_data_bytes) {
-        SIO_LOG_ERROR("Incomplete SIO response: Received %d bytes, expected %d", 
-                      fujinet_response_buffer_size, expected_data_bytes);
-        return FUJINET_SIO_ERROR; /* Return error if response incomplete */
-    }
-
-    /* Check for buffer overflow during receive */
-    if (fujinet_response_buffer_size >= FUJINET_BUFFER_SIZE && expected_data_bytes >= FUJINET_BUFFER_SIZE) {
-         SIO_LOG_ERROR("FujiNet response buffer overflow occurred during receive.");
-         return FUJINET_SIO_ERROR;
-    }
-
-    SIO_LOG_DEBUG("Full SIO response received (%d bytes). First byte (status): 0x%02X", 
-                  fujinet_response_buffer_size, fujinet_response_buffer[0]);
-
-    /* Return the first byte, which is the SIO status code (ACK/NAK/COMPLETE/ERROR) */
-    return fujinet_response_buffer[0];
-    /* --- End Cascade Changes --- */
 }
 
 /*
@@ -291,19 +119,29 @@ UBYTE FujiNet_SIO_ProcessCommand(const UBYTE *command_frame) {
  *  -1 = Error
  */
 int FujiNet_SIO_GetByte(uint8_t *byte) {
-    /* Check if we have valid response data */
-    if (fujinet_response_buffer_size <= 0 || fujinet_response_buffer_pos >= fujinet_response_buffer_size) {
-        /* No data available */
-        return 0;
+    if (!sio_enabled) {
+        SIO_LOG_ERROR("GetByte called but SIO not enabled");
+        return -1;
     }
     
-    /* Get the next byte from the response buffer */
-    *byte = fujinet_response_buffer[fujinet_response_buffer_pos++];
+    if (!byte) {
+        SIO_LOG_ERROR("GetByte called with NULL byte pointer");
+        return -1;
+    }
     
-    SIO_LOG_DEBUG("SIO_GetByte: Returning byte 0x%02X at position %d/%d", 
-                 *byte, fujinet_response_buffer_pos - 1, fujinet_response_buffer_size - 1);
+    /* Get a byte from the NetSIO response buffer */
+    int result = FujiNet_NetSIO_GetByte(byte);
     
-    return 1; /* Success */
+    if (result == 1) {
+        SIO_LOG_DEBUG("Read byte 0x%02X from NetSIO", *byte);
+        return 1;
+    } else if (result == 0) {
+        SIO_LOG_DEBUG("No data available from NetSIO");
+        return 0;
+    } else {
+        SIO_LOG_ERROR("Error reading byte from NetSIO");
+        return -1;
+    }
 }
 
 /*
@@ -314,17 +152,21 @@ int FujiNet_SIO_GetByte(uint8_t *byte) {
  *  -1 = Error
  */
 int FujiNet_SIO_PutByte(uint8_t byte) {
-    /* For now, we only support sending bytes as part of command frames */
-    /* The main SIO module will build the full command frame and call FujiNet_SIO_ProcessCommand */
-    /* Individual byte transmission is not needed for most SIO operations */
+    if (!sio_enabled) {
+        SIO_LOG_ERROR("PutByte called but SIO not enabled");
+        return -1;
+    }
     
-    SIO_LOG_DEBUG("SIO_PutByte called with byte 0x%02X - operation not supported", byte);
+    /* Send the byte via NetSIO */
+    int result = FujiNet_NetSIO_PutByte(byte);
     
-    /* If we need to send data to the host (e.g., for write operations), 
-       we'll need to implement a buffer and proper message formatting */
-    
-    /* Return success for now to avoid blocking the SIO process */
-    return 1;
+    if (result == 1) {
+        SIO_LOG_DEBUG("Sent byte 0x%02X via NetSIO", byte);
+        return 1;
+    } else {
+        SIO_LOG_ERROR("Failed to send byte 0x%02X via NetSIO", byte);
+        return -1;
+    }
 }
 
 /*
@@ -335,10 +177,12 @@ void FujiNet_SIO_SetMotorState(int on) {
         return;
     }
     
-    if (on != motor_state) {
+    if (motor_state != on) {
         motor_state = on;
         SIO_LOG_DEBUG("Motor state changed to %s", on ? "ON" : "OFF");
-        /* Motor state changes are currently not sent to NetSIO */
+        
+        /* Update motor state via NetSIO */
+        FujiNet_NetSIO_SetMotorState(on);
     }
 }
 
@@ -353,12 +197,12 @@ int FujiNet_SIO_IsDeviceEnabled(void) {
  * Get the current position within the response buffer
  */
 int FujiNet_SIO_GetResponseBufferPos(void) {
-    return fujinet_response_buffer_pos;
+    return FujiNet_NetSIO_GetResponseBufferPos();
 }
 
 /*
  * Get the total size of the data currently in the response buffer
  */
 int FujiNet_SIO_GetResponseBufferSize(void) {
-    return fujinet_response_buffer_size;
+    return FujiNet_NetSIO_GetResponseBufferSize();
 }

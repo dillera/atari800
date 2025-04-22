@@ -1,0 +1,14 @@
+CC = gcc
+CFLAGS = -Wall -g
+LDFLAGS = 
+
+# Target
+all: netsio_test
+
+netsio_test: netsio_test.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+clean:
+	rm -f netsio_test
+
+.PHONY: all clean
