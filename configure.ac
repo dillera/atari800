@@ -1340,6 +1340,19 @@ if [[ "$SUPPORTS_RDEVICE" = "yes" ]]; then
 fi
 AM_CONDITIONAL([WANT_R_IO_DEVICE], test "$WANT_R_IO_DEVICE" = "yes")
 
+# Add FujiNet support
+A8_OPTION(fujinet,yes,
+          [Support FujiNet networking via NetSIO protocol (default=ON)],
+          USE_FUJINET,[Define to enable FujiNet support.]
+         )
+if [[ "$WANT_USE_FUJINET" = "yes" ]]; then
+    # Windows needs winsock library
+    if [[ "$a8_host" = "win" ]]; then
+        A8_NEED_LIB(ws2_32)
+    fi
+fi
+AM_CONDITIONAL([WANT_USE_FUJINET], test "$WANT_USE_FUJINET" = "yes")
+
 dnl Wrapup: export and write Makefile...
 
 AC_SUBST(JAVAFLAGS)
@@ -1445,6 +1458,7 @@ if [[ "$SUPPORTS_RDEVICE" = "yes" ]]; then
             echo "    Using R: with IP network support......: $WANT_R_NETWORK"
         fi
 fi
+echo "Using FujiNet support?................: $WANT_USE_FUJINET"
 if [[ "$a8_target" = default -a "$with_video" = sdl ]]; then
     echo "Using on-screen keyboard?.............: $WANT_USE_UI_BASIC_ONSCREEN_KEYBOARD"
     echo "Using OpenGL?.........................: $with_opengl"
