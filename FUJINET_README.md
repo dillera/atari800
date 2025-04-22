@@ -1,4 +1,6 @@
 # FujiNet Integration for Atari800 Emulator
+![a800-able-archer-logo_small](https://github.com/user-attachments/assets/54b581a0-889d-4ad4-8d96-132734431bbb)
+
 
 ## Overview
 
@@ -15,15 +17,14 @@ FujiNet is a Wi-Fi networking device for the Atari 8-bit line of computers, prov
 The integration follows a modular approach:
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   atari800      │     │      NetSIO     │     │     FujiNet     │
-│   emulator      │◄───►│       Hub       │◄───►│     device      │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-     (Emulator)              (Bridge)              (Peripheral)
+┌─────────────────┐┌─────────────────┐     ┌─────────────────┐
+│   atari800             NetSIO      │     │     FujiNet     │
+│   emulator             protocol    │◄───►│     device      │
+└─────────────────┘└─────────────────┘     └─────────────────┘
+     (Emulator)    (fujinet_netsio code)      (Fujinet-PC service)
 ```
 
 - **Atari800 Emulator**: Modified to redirect SIO operations to FujiNet via UDP
-- **NetSIO Hub**: Acts as a protocol bridge (external component)
 - **FujiNet Device**: The physical or virtual device that provides services to the emulated Atari
 
 ### Components
