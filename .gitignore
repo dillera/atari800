@@ -7,6 +7,8 @@
 /compile
 /config.log
 /config.status
+/config.guess
+/config.sub
 /configure
 /depcomp
 /DOC/Makefile
