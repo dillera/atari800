@@ -86,10 +86,10 @@ make CFLAGS="-DUSE_FUJINET -DDEBUG_FUJINET"
 
 ### Basic Setup
 
-1. Start the NetSIO Hub
+1. Start the FujiNet pC
    ```bash
-   cd fujinet-bridge
-   python -m netsiohub
+   cd fujinet
+   run-fujinet
    ```
 
 2. Launch the Atari800 emulator
@@ -97,17 +97,17 @@ make CFLAGS="-DUSE_FUJINET -DDEBUG_FUJINET"
    ./atari800
    ```
 
-The emulator will automatically attempt to connect to the NetSIO Hub on localhost port 9997.
+The FujiNet-PC will automatically attempt to connect to the emulator on localhost port 9997.
 
 ### Configuration
 
-The default configuration connects to the NetSIO Hub on `localhost:9997`. This can be changed in the emulator's configuration file.
+The default configuration registers a UDP listener on `localhost:9997`. This can be changed in the emulator's configuration file.
 
 ## Troubleshooting
 
 If you encounter issues with the FujiNet connection:
 
-1. Verify the NetSIO Hub is running
+1. Verify the FujiNet PC is running
 2. Check if any firewall is blocking UDP port 9997
 3. Enable debug output with `-DDEBUG_FUJINET` to see detailed logs
 
@@ -117,16 +117,9 @@ If you encounter issues with the FujiNet connection:
 
 - The FujiNet integration is conditionally compiled with the `USE_FUJINET` preprocessor flag
 - All networking is done via non-blocking UDP sockets
-- NetSIO protocol requires careful management of command credits and synchronization
-
-### Future Improvements
-
-- Support for configuring the NetSIO Hub address and port
-- Enhanced error handling and recovery
-- More comprehensive debugging options
 
 ## Credits
 
 - Atari800 development team
 - FujiNet project contributors
-- NetSIO protocol designers
+- NetSIO protocol designers (APC)
