@@ -80,6 +80,10 @@
 #include "libatari800/cpu_crash.h"
 #endif
 
+#ifdef USE_FUJINET
+#include "fujinet.h"
+#endif
+
 /* For Atari Basic loader */
 void (*CPU_rts_handler)(void) = NULL;
 
@@ -451,6 +455,15 @@ __extension__ /* suppress -ansi -pedantic warnings */
 #endif
 void CPU_GO(int limit)
 {
+#ifdef USE_FUJINET
+	/* If waiting for FujiNet SIO sync, pause CPU execution */
+	if (fujinet_WaitingForSync) {
+		/* TODO: Should we consume *any* cycles here? Or just return? */
+		/* For now, just return, effectively pausing the CPU. */
+		return;
+	}
+#endif
+
 #ifdef NO_GOTO
 #define OPCODE_ALIAS(code)	case 0x##code:
 #define DONE				break
