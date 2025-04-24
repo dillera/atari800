@@ -15,6 +15,24 @@
 #define SIO_ERR ('E')  /* Error */
 #define SIO_COMPLETE ('C') /* Complete */
 
+/* Constants for SIO Buffer Size */
+#define SIO_BUFFER_SIZE 1024 /* Match NetSIO buffer size for safety */
+
+/* Constants for SIO Transfer Status */
+#define SIO_NoFrame      0 /* No data frame being transferred */
+#define SIO_ReceiveFrame 1 /* Data frame received into SIO.DataBuffer */
+#define SIO_SendFrame    2 /* Data frame prepared in SIO.DataBuffer to be sent */
+
+/* Global SIO State Structure (defined in sio.c) */
+typedef struct {
+    UBYTE DataBuffer[SIO_BUFFER_SIZE];
+    int DataLen;  /* Current length of valid data in DataBuffer */
+    /* Add other SIO state members if needed here */
+} SIO_State_t;
+
+extern SIO_State_t SIO;
+extern int TransferStatus; /* Current state of SIO data transfer (SIO_NoFrame, etc.) */
+
 typedef enum SIO_tagUnitStatus {
 	SIO_OFF,
 	SIO_NO_DISK,

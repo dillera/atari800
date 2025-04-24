@@ -45,13 +45,14 @@
 #include "pokeysnd.h"
 #include "sio.h"
 #include "util.h"
+#include "fujinet_netsio.h" /* Needed for FujiNet_NetSIO_ForwardSIOCommand */
+#include "fujinet.h" /* ADDED for FujiNet support */
 #ifndef BASIC
 #include "statesav.h"
 #endif
 
 #ifdef USE_FUJINET
-#include "fujinet.h" /* Needed for fujinet_connected */
-#include "fujinet_netsio.h" /* Needed for FujiNet_NetSIO_ForwardSIOCommand */
+#include "fujinet_netsio.h"
 #endif
 
 #undef DEBUG_PRO
@@ -178,7 +179,8 @@ static UBYTE CommandFrame[6];
 static int CommandIndex = 0;
 static UBYTE DataBuffer[256 + 3];
 static int DataIndex = 0;
-static int TransferStatus = SIO_NoFrame;
+int TransferStatus = SIO_NoFrame;
+SIO_State_t SIO;
 static int ExpectedBytes = 0;
 
 int ignore_header_writeprotect = FALSE;
@@ -1120,6 +1122,7 @@ static int last_ypos = 0;
 /* SIO patch emulation routine */
 void SIO_Handler(void)
 {
+	Log_print("SIO DEBUG: >>> SIO_Handler ENTRY POINT CALLED <<<"); /* ADDED CHECK */
 	UBYTE devic = MEMORY_dGetByte(0x300);    /* Device ID ($D300 -> $0300) */
 	UBYTE comnd = MEMORY_dGetByte(0x302);    /* Command ($D302 -> $0302) */
 	UBYTE aux1 = MEMORY_dGetByte(0x303);     /* Aux1 ($D303 -> $0303) */
@@ -1130,82 +1133,19 @@ void SIO_Handler(void)
 	UBYTE unit;
 	UBYTE result = 0x00;
 
-	Log_print("SIO: Processing command locally for device %02X (Cmd:%02X Aux1:%02X Aux2:%02X)", devic, comnd, aux1, aux2);
+	Log_print("SIO: Raw command dev:%02X cmd:%02X aux1:%02X aux2:%02X", devic, comnd, aux1, aux2);
 
-	switch (devic) {
-		/* Cassette commands DUP:0x30 */
-		case 0x30:
-		case 0x3a:
-			break;
+	/* If FujiNet is enabled, forward ALL SIO traffic */
+	if (FujiNet_IsConnected()) {
+		Log_print("SIO: FujiNet Enabled - Forwarding command for device %02X (Cmd:%02X Aux1:%02X Aux2:%02X)", devic, comnd, aux1, aux2);
+		result = FujiNet_ProcessSIO(devic, comnd, aux1, aux2);
+	} else {
+		/* FujiNet not enabled - behave as if no device responded */
+		Log_print("SIO: FujiNet NOT Enabled - Responding NACK for device %02X (Cmd:%02X)", devic, comnd);
+		result = 'N'; /* DNACK: device does not acknowledge command */
+		TransferStatus = SIO_NoFrame;
+	}
 
-		/* Disk drive commands DUP:0x31-0x38 */
-		case 0x31:
-		case 0x32:
-		case 0x33:
-		case 0x34:
-		case 0x35:
-		case 0x36:
-		case 0x37:
-		case 0x38:
-			/* Disk drive handler */
-			/* Check status */
-			if (disk[devic - 0x31] == NULL && comnd != 0x53) {
-				Log_print("SIO: Drive %d is OFF", devic - 0x30);
-				result = 'E';
-				TransferStatus = SIO_NoFrame;
-			} else {
-				switch (comnd) {
-				case 0x53:	/* Status */
-					result = handle_status_request(devic - 0x31);
-					break;
-				case 0x21:	/* Format drive (no density) */
-				case 0x22:	/* Format drive (double density) */
-					result = handle_format(devic - 0x31, comnd);
-					break;
-				case 0x52:	/* Read sector */
-					result = handle_read_sector(devic - 0x31, aux1 | (aux2 << 8));
-					break;
-				case 0x57:	/* Write sector (no verify) */
-					result = handle_write_sector(devic - 0x31, aux1 | (aux2 << 8), 0);
-					break;
-				case 0x50:	/* Write sector (verify) */
-					result = handle_write_sector(devic - 0x31, aux1 | (aux2 << 8), 1);
-					break;
-				default:
-					Log_print("SIO: Unknown disk command %x", comnd);
-					result = 'E';
-					TransferStatus = SIO_NoFrame;
-					break;
-				}
-			}
-			break;
-
-		/* Printer commands DUP:0x40 */
-		case 0x40:
-			/* Printer handler */
-			result = 'N';
-			TransferStatus = SIO_NoFrame;
-			Log_print("SIO: P: handler not implemented.");
-			break;
-
-		/* Modem/RS232 commands DUP:0x43 */
-		case 0x43:
-			/* Modem handler */
-			result = 'N';
-			TransferStatus = SIO_NoFrame;
-			Log_print("SIO: R: handler not implemented.");
-			break;
-
-		default:
-			/* Unknown device */
-			Log_print("SIO: Unknown device %x", devic);
-			result = 'N';
-			TransferStatus = SIO_NoFrame;
-			break;
-	} /* end switch(devic) */
-
-	result = SIO_ProcessCommandFrame();
-	
 	/* Update registers based on result */
 	if (result == 'C' || result == 'A') {
 		CPU_regY = 1; /* SUCCES: successful operation */
@@ -1250,6 +1190,12 @@ void SIO_SwitchCommandFrame(int onoff)
 #endif
 	Log_print("SIO DEBUG: SwitchCommandFrame called with onoff=%d", onoff);
 
+#ifdef USE_FUJINET
+	/* Disable SIO patch programmatically as a safeguard */
+	extern int ESC_enable_sio_patch;
+	ESC_enable_sio_patch = 0;
+#endif
+
 	if (onoff) { /* Enabled */
 		/* When turning on command frame processing, only log unexpected states 
 		 * if they're not related to normal operation. The emulator frequently
@@ -1293,16 +1239,37 @@ void SIO_SwitchCommandFrame(int onoff)
 	}
 }
 
-/* Processes the command frame and returns the appropriate response
-   value for the POKEY serial I/O controller */
-UBYTE SIO_ProcessCommandFrame(void)
+/* Intercept SIO command frames and forward to FujiNet if appropriate */
+static int SIO_ForwardToFujiNetIfNeeded(void)
 {
+#ifdef USE_FUJINET
+	if (fujinet_connected) {
+		UBYTE device_id = CommandFrame[0];
+		if (device_id == 0x70 || (device_id >= 0x31 && device_id <= 0x34)) {
+			FujiNet_NetSIO_ForwardSIOCommand(CommandFrame, CommandFrame[4]);
+			Log_print("SIO: Forwarded command frame to FujiNet (device %02X)", device_id);
+			return 1; /* handled by FujiNet */
+		}
+	}
+#endif
+	return 0; /* not handled by FujiNet */
+}
+
+/* Patch SIO_ProcessCommandFrame to call our forwarding routine and bypass local handling if needed */
+static UBYTE SIO_ProcessCommandFrame(void)
+{
+	if (SIO_ForwardToFujiNetIfNeeded()) {
+		/* Wait for FujiNet response, handled asynchronously in FujiNet_NetSIO_HandleSyncResponse */
+		TransferStatus = SIO_NoFrame;
+		return FujiNet_NetSIO_GetResponseStatus();
+	}
+	/* ... original function body follows ... */
 	UBYTE devic = CommandFrame[0];
 	UBYTE commd = CommandFrame[1];
 	UBYTE aux1 = CommandFrame[2];
 	UBYTE aux2 = CommandFrame[3];
 	UBYTE cksum = CommandFrame[4];
-	UBYTE status = SIO_NAK; /* Default status: Not Acknowledge */
+	UBYTE status = SIO_NAK; /* Default to error */
 
 	Log_print("SIO DEBUG: ProcessCommandFrame called - D:%02X C:%02X A1:%02X A2:%02X CK:%02X", 
 		devic, commd, aux1, aux2, cksum);
@@ -1315,46 +1282,6 @@ UBYTE SIO_ProcessCommandFrame(void)
 		TransferStatus = SIO_NoFrame;
 		return SIO_ERR; /* Checksum Error */
 	}
-
-#ifdef USE_FUJINET
-	/* --- PROJECT ABLE ARCHER: REDIRECT ALL SIO TRAFFIC TO FUJINET --- */
-	if (fujinet_connected) {
-		/* INTERCEPT ALL SIO COMMANDS, regardless of device ID */
-		Log_print("SIO DEBUG: [ABLE ARCHER] Forwarding CMD D:%02X C:%02X A1:%02X A2:%02X to FujiNet", 
-			devic, commd, aux1, aux2);
-
-		/* Make sure we're polling for UDP packets by setting up the polling mechanism */
-		if (!fujinet_poll_initialized) {
-			Log_print("SIO DEBUG: Enabling FujiNet NetSIO packet polling");
-			/* Call FujiNet_Update() from Atari800_Frame() to process UDP packets */
-			fujinet_poll_initialized = TRUE;
-		}
-
-		/* Forward the SIO command to FujiNet via NetSIO */
-		if (FujiNet_NetSIO_ForwardSIOCommand(devic, commd, aux1, aux2)) {
-			/* Command successfully forwarded. Atari expects an ACK/response. */
-			/* IMPORTANT: The actual data response will be handled when FujiNet_Update() 
-			 * processes incoming NetSIO response packets and stores them for the
-			 * handler functions to retrieve */
-			
-			/* Ready for next command */
-			TransferStatus = SIO_NoFrame;
-			return SIO_ACK; /* Send ACK to Atari immediately */
-		} 
-		else {
-			/* Failed to forward. Log error and return error to Atari */
-			Log_print("SIO DEBUG: ERROR forwarding command to FujiNet for device %02X", devic);
-			TransferStatus = SIO_NoFrame;
-			return SIO_ERR;
-		}
-		
-		/* When FujiNet is connected, we NEVER execute the code below */
-	}
-#endif /* USE_FUJINET */
-
-	/* --- Original SIO Handling (Only executed if FujiNet is not connected) --- */
-	Log_print("SIO DEBUG: Processing command locally - Device:%02X Cmd:%02X Aux1:%02X Aux2:%02X", 
-	         devic, commd, aux1, aux2);
 
 	switch (devic) {
 		/* Disk drive commands (D1:-D8: devices 0x31-0x38) */

@@ -68,7 +68,7 @@ static UBYTE CommandFrame[6];
 static int CommandIndex = 0;
 static UBYTE DataBuffer[256 + 3];
 static int DataIndex = 0;
-static int TransferStatus = PIO_CommandFrame;
+static int XLD_TransferStatus = PIO_CommandFrame;
 static int ExpectedBytes = 5;
 static void PIO_PutByte(int byte);
 static int PIO_GetByte(void);
@@ -243,11 +243,11 @@ void PBI_XLD_D1PutByte(UWORD addr, UBYTE byte)
 			/* 8040 T1=1 */
 			CommandIndex = 0;
 			DataIndex = 0;
-			TransferStatus = PIO_CommandFrame;
+			XLD_TransferStatus = PIO_CommandFrame;
 			ExpectedBytes = 5;
 			D(printf("command frame expected\n"));
 		}
-		else if (TransferStatus == PIO_StatusRead || TransferStatus == PIO_ReadFrame) {
+		else if (XLD_TransferStatus == PIO_StatusRead || XLD_TransferStatus == PIO_ReadFrame) {
 			D(printf("read ack strobe\n"));
 		}
 		else {
@@ -317,27 +317,27 @@ static UBYTE WriteSectorBack(void)
 /* Put a byte that comes from the parallel bus */
 static void PIO_PutByte(int byte)
 {
-	D(printf("TransferStatus:%d\n",TransferStatus));
-	switch (TransferStatus) {
+	D(printf("TransferStatus:%d\n",XLD_TransferStatus));
+	switch (XLD_TransferStatus) {
 	case PIO_CommandFrame:
 		D(printf("CommandIndex:%d ExpectedBytes:%d\n",CommandIndex,ExpectedBytes));
 		if (CommandIndex < ExpectedBytes) {
 			CommandFrame[CommandIndex++] = byte;
 			if (CommandIndex >= ExpectedBytes) {
 				if (CommandFrame[0] >= 0x31 && CommandFrame[0] <= 0x38) {
-					TransferStatus = PIO_StatusRead;
+					XLD_TransferStatus = PIO_StatusRead;
 					/*DELAYED_SERIN_IRQ = SERIN_INTERVAL + ACK_INTERVAL;*/
 					D(printf("TransferStatus = PIO_StatusRead\n"));
 				}
 				else{
-					TransferStatus = PIO_NoFrame;
+					XLD_TransferStatus = PIO_NoFrame;
 					D(printf("TransferStatus = PIO_NoFrame\n"));
 				}
 			}
 		}
 		else {
 			Log_print("Invalid command frame!");
-			TransferStatus = PIO_NoFrame;
+			XLD_TransferStatus = PIO_NoFrame;
 		}
 		break;
 	case PIO_WriteFrame:		/* Expect data */
@@ -353,17 +353,17 @@ static void PIO_PutByte(int byte)
 						DataIndex = 0;
 						ExpectedBytes = 2;
 						/*DELAYED_SERIN_IRQ = SERIN_INTERVAL + ACK_INTERVAL;*/
-						TransferStatus = PIO_FinalStatus;
+						XLD_TransferStatus = PIO_FinalStatus;
 					}
 					else
-						TransferStatus = PIO_NoFrame;
+						XLD_TransferStatus = PIO_NoFrame;
 				}
 				else {
 					DataBuffer[0] = 'E';
 					DataIndex = 0;
 					ExpectedBytes = 1;
 					/*DELAYED_SERIN_IRQ = SERIN_INTERVAL + ACK_INTERVAL;*/
-					TransferStatus = PIO_FinalStatus;
+					XLD_TransferStatus = PIO_FinalStatus;
 				}
 			}
 		}
@@ -379,14 +379,14 @@ static void PIO_PutByte(int byte)
 static int PIO_GetByte(void)
 {
 	int byte = 0;
-	D(printf("PIO_GetByte TransferStatus:%d\n",TransferStatus));
+	D(printf("PIO_GetByte TransferStatus:%d\n",XLD_TransferStatus));
 
-	switch (TransferStatus) {
+	switch (XLD_TransferStatus) {
 	case PIO_StatusRead:
 		byte = PIO_Command_Frame();		/* Handle now the command */
 		break;
 	case PIO_FormatFrame:
-		TransferStatus = PIO_ReadFrame;
+		XLD_TransferStatus = PIO_ReadFrame;
 		/*DELAYED_SERIN_IRQ = SERIN_INTERVAL << 3;*/
 		/* FALL THROUGH */
 	case PIO_ReadFrame:
@@ -394,7 +394,7 @@ static int PIO_GetByte(void)
 		if (DataIndex < ExpectedBytes) {
 			byte = DataBuffer[DataIndex++];
 			if (DataIndex >= ExpectedBytes) {
-				TransferStatus = PIO_NoFrame;
+				XLD_TransferStatus = PIO_NoFrame;
 			}
 			/*else {*/
 				/* set delay using the expected transfer speed */
@@ -404,14 +404,14 @@ static int PIO_GetByte(void)
 		}
 		else {
 			Log_print("Invalid read frame!");
-			TransferStatus = PIO_NoFrame;
+			XLD_TransferStatus = PIO_NoFrame;
 		}
 		break;
 	case PIO_FinalStatus:
 		if (DataIndex < ExpectedBytes) {
 			byte = DataBuffer[DataIndex++];
 			if (DataIndex >= ExpectedBytes) {
-				TransferStatus = PIO_NoFrame;
+				XLD_TransferStatus = PIO_NoFrame;
 			}
 			/*else {
 				if (DataIndex == 0)
@@ -422,7 +422,7 @@ static int PIO_GetByte(void)
 		}
 		else {
 			Log_print("Invalid read frame!");
-			TransferStatus = PIO_NoFrame;
+			XLD_TransferStatus = PIO_NoFrame;
 		}
 		break;
 	default:
@@ -445,7 +445,7 @@ static UBYTE PIO_Command_Frame(void)
 		Log_print("Unknown command frame: %02x %02x %02x %02x %02x",
 			   CommandFrame[0], CommandFrame[1], CommandFrame[2],
 			   CommandFrame[3], CommandFrame[4]);
-		TransferStatus = PIO_NoFrame;
+		XLD_TransferStatus = PIO_NoFrame;
 		return 0;
 	}
 	switch (CommandFrame[1]) {
@@ -471,7 +471,7 @@ static UBYTE PIO_Command_Frame(void)
 		DataBuffer[13] = SIO_ChkSum(DataBuffer + 1, 12);
 		DataIndex = 0;
 		ExpectedBytes = 14;
-		TransferStatus = PIO_ReadFrame;
+		XLD_TransferStatus = PIO_ReadFrame;
 		/*DELAYED_SERIN_IRQ = SERIN_INTERVAL;*/
 		return 'A';
 	case 0x4f:				/* Write status */
@@ -482,7 +482,7 @@ static UBYTE PIO_Command_Frame(void)
 #endif
 		ExpectedBytes = 13;
 		DataIndex = 0;
-		TransferStatus = PIO_WriteFrame;
+		XLD_TransferStatus = PIO_WriteFrame;
 		return 'A';
 	case 0x50:				/* Write */
 	case 0x57:
@@ -494,7 +494,7 @@ static UBYTE PIO_Command_Frame(void)
 		SIO_SizeOfSector((UBYTE) unit, sector, &realsize, NULL);
 		ExpectedBytes = realsize + 1;
 		DataIndex = 0;
-		TransferStatus = PIO_WriteFrame;
+		XLD_TransferStatus = PIO_WriteFrame;
 		SIO_last_op = SIO_LAST_WRITE;
 		SIO_last_op_time = 10;
 		SIO_last_drive = unit + 1;
@@ -510,7 +510,7 @@ static UBYTE PIO_Command_Frame(void)
 		DataBuffer[1 + realsize] = SIO_ChkSum(DataBuffer + 1, realsize);
 		DataIndex = 0;
 		ExpectedBytes = 2 + realsize;
-		TransferStatus = PIO_ReadFrame;
+		XLD_TransferStatus = PIO_ReadFrame;
 		/* wait longer before confirmation because bytes could be lost */
 		/* before the buffer was set (see $E9FB & $EA37 in XL-OS) */
 		/*DELAYED_SERIN_IRQ = SERIN_INTERVAL << 2;*/
@@ -625,7 +625,7 @@ static UBYTE PIO_Command_Frame(void)
 		DataBuffer[1 + 4] = SIO_ChkSum(DataBuffer + 1, 4);
 		DataIndex = 0;
 		ExpectedBytes = 6;
-		TransferStatus = PIO_ReadFrame;
+		XLD_TransferStatus = PIO_ReadFrame;
 		/*DELAYED_SERIN_IRQ = SERIN_INTERVAL;*/
 		return 'A';
 	case 0x21:				/* Format Disk */
@@ -639,7 +639,7 @@ static UBYTE PIO_Command_Frame(void)
 		DataBuffer[1 + realsize] = SIO_ChkSum(DataBuffer + 1, realsize);
 		DataIndex = 0;
 		ExpectedBytes = 2 + realsize;
-		TransferStatus = PIO_FormatFrame;
+		XLD_TransferStatus = PIO_FormatFrame;
 		/*DELAYED_SERIN_IRQ = SERIN_INTERVAL;*/
 		return 'A';
 	case 0x22:				/* Dual Density Format */
@@ -652,7 +652,7 @@ static UBYTE PIO_Command_Frame(void)
 		DataBuffer[1 + 128] = SIO_ChkSum(DataBuffer + 1, 128);
 		DataIndex = 0;
 		ExpectedBytes = 2 + 128;
-		TransferStatus = PIO_FormatFrame;
+		XLD_TransferStatus = PIO_FormatFrame;
 		/*DELAYED_SERIN_IRQ = SERIN_INTERVAL;*/
 		return 'A';
 
@@ -675,7 +675,7 @@ static UBYTE PIO_Command_Frame(void)
 			CommandFrame[0], CommandFrame[1], CommandFrame[2],
 			CommandFrame[3], CommandFrame[4]);
 #endif
-		TransferStatus = PIO_NoFrame;
+		XLD_TransferStatus = PIO_NoFrame;
 		return 'E';
 	}
 }
@@ -698,7 +698,7 @@ void PBI_XLD_StateSave(void)
 		StateSav_SaveINT(&CommandIndex, 1);
 		StateSav_SaveUBYTE(DataBuffer, sizeof(DataBuffer));
 		StateSav_SaveINT(&DataIndex, 1);
-		StateSav_SaveINT(&TransferStatus, 1);
+		StateSav_SaveINT(&XLD_TransferStatus, 1);
 		StateSav_SaveINT(&ExpectedBytes, 1);
 		StateSav_SaveINT(&VOTRAXSND_busy, 1);
 	}
@@ -724,7 +724,7 @@ void PBI_XLD_StateRead(void)
 		StateSav_ReadINT(&CommandIndex, 1);
 		StateSav_ReadUBYTE(DataBuffer, sizeof(DataBuffer));
 		StateSav_ReadINT(&DataIndex, 1);
-		StateSav_ReadINT(&TransferStatus, 1);
+		StateSav_ReadINT(&XLD_TransferStatus, 1);
 		StateSav_ReadINT(&ExpectedBytes, 1);
 		StateSav_ReadINT(&VOTRAXSND_busy, 1);
 	}

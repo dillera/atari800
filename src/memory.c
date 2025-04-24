@@ -277,7 +277,6 @@ void MEMORY_InitialiseMachine(void)
 			int const base_ram = MEMORY_ram_size > 64 ? 64 * 1024 : MEMORY_ram_size * 1024;
 			int const hole_end = (os_rom_start < 0xd000 ? os_rom_start : 0xd000);
 			int const hole_start = base_ram > hole_end ? hole_end : base_ram;
-			ESC_PatchOS();
 			MEMORY_dFillMem(0x0000, 0x00, hole_start);
 			MEMORY_SetRAM(0x0000, hole_start - 1);
 			if (hole_start < hole_end) {
@@ -325,7 +324,20 @@ void MEMORY_InitialiseMachine(void)
 				}
 			}
 #endif
+			ESC_PatchOS();
 		}
+		break;
+	case Atari800_MACHINE_XLXE:
+		MEMORY_SetROM(0xc000, 0xcfff);
+		MEMORY_SetROM(0xd800, 0xffff);
+		/* Hardware */
+		MEMORY_SetHARDWARE(0xd000, 0xd7ff);
+
+		/* Copy initial OS ROM from buffer to main memory */
+		memcpy(MEMORY_mem + 0xc000, MEMORY_os, 0x1000);
+		memcpy(MEMORY_mem + 0xd800, MEMORY_os + 0x1800, 0x2800);
+		/* Apply OS patches (including SIO) */
+		ESC_PatchOS();
 		break;
 	}
 	AllocXEMemory();

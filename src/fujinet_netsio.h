@@ -3,12 +3,13 @@
 #define FUJINET_NETSIO_H_
 
 #include "config.h"
-#include "atari.h" /* For BOOL */
+#include "atari.h" /* For BOOL, UBYTE */
 #include <stdint.h> /* For uint8_t */
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
+#include <stddef.h>     /* For size_t -> ssize_t */
 
 /* Ensure BOOL type is defined */
 #ifndef BOOL
@@ -57,9 +58,8 @@ int FujiNet_NetSIO_PrepareSIOCommandSequence(
                             unsigned char *data_out_buf, size_t *data_out_len, 
                             unsigned char *off_sync_buf, size_t *off_sync_len);
 
-/* Forward an SIO command to the connected FujiNet device via NetSIO.
- * Returns TRUE on success, FALSE on failure. */
-BOOL FujiNet_NetSIO_ForwardSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE aux2);
+/* Forwards an SIO command frame via NetSIO */
+void FujiNet_NetSIO_ForwardSIOCommand(const UBYTE sio_frame[4], UBYTE checksum);
 
 /* --- NetSIO Response Handling --- */
 

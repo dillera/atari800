@@ -199,7 +199,6 @@ void ESC_PatchOS(void)
 		case SYSROM_BB00R1:
 		case SYSROM_BB01R2:
 		case SYSROM_BB02R3:
-		case SYSROM_BB02R3V4:
 		case SYSROM_BB01R3:
 		case SYSROM_BB01R4_OS:
 		case SYSROM_BB01R59:
@@ -247,14 +246,31 @@ void ESC_PatchOS(void)
 				ESC_Add(addr_s, ESC_COPENSAVE, CassetteLeaderSave);
 			}
 		}
-		ESC_AddEscRts(0xe459, ESC_SIOV, SIO_Handler);
 		patched = TRUE;
 	}
 	else {
 		ESC_Remove(ESC_COPENLOAD);
 		ESC_Remove(ESC_COPENSAVE);
-		ESC_Remove(ESC_SIOV);
-	};
+		/* Only remove SIOV if FujiNet is NOT being used */
+		#ifndef USE_FUJINET
+		  ESC_Remove(ESC_SIOV);
+		#endif
+	}
+
+	/* --- ABLE ARCHER: Always enable SIOV patch if FujiNet is compiled in --- */
+	#ifdef USE_FUJINET
+	  Log_print("ESC_PatchOS: Enabling SIOV handler for FujiNet");
+	  ESC_AddEscRts(0xe459, ESC_SIOV, SIO_Handler);
+	  /* Ensure 'patched' is true if we added the SIOV patch here, 
+	   * even if cassette patches were skipped */
+	  patched = TRUE; 
+	#else
+	  /* Original logic: Add SIOV patch only if cassette/SIO patches were enabled */
+	  if (patched) { /* If cassette patches were added */
+	      ESC_AddEscRts(0xe459, ESC_SIOV, SIO_Handler);
+	  }
+	#endif
+
 	if (patched){
 		UWORD addr;
 		switch (Atari800_os_version) {

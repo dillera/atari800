@@ -78,6 +78,11 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
                              const UBYTE *output_buffer, int output_len,
                              UBYTE *input_buffer, int *input_len_ptr);
 
+/* Processes an SIO command directly via NetSIO, handling the full transaction.
+ * device_id, command, aux1, aux2: SIO command parameters.
+ * Returns: SIO completion code ('A', 'C', 'E', 'N'). */
+UBYTE FujiNet_ProcessSIO(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE aux2);
+
 #endif /* USE_FUJINET */
 
 #endif /* FUJINET_H_ */
