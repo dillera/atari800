@@ -1122,7 +1122,6 @@ static int last_ypos = 0;
 /* SIO patch emulation routine */
 void SIO_Handler(void)
 {
-	Log_print("SIO DEBUG: >>> SIO_Handler ENTRY POINT CALLED <<<"); /* ADDED CHECK */
 	UBYTE devic = MEMORY_dGetByte(0x300);    /* Device ID ($D300 -> $0300) */
 	UBYTE comnd = MEMORY_dGetByte(0x302);    /* Command ($D302 -> $0302) */
 	UBYTE aux1 = MEMORY_dGetByte(0x303);     /* Aux1 ($D303 -> $0303) */
@@ -1132,6 +1131,30 @@ void SIO_Handler(void)
 	int sector = (aux2 << 8) | aux1;         /* Combine aux bytes for sector number */
 	UBYTE unit;
 	UBYTE result = 0x00;
+
+	
+	#ifdef USE_FUJINET
+    /* Forward SIO commands to FujiNet via NetSIO */
+    {
+        static int not_connected_counter = 0;
+        if (!FujiNet_NetSIO_IsClientConnected()) {
+            if (not_connected_counter++ % 1000 == 0) { // Log only every 1000 calls
+                Log_print("SIO: FujiNet not connected - returning NACK"); // Changed log message
+            }
+            CPU_regY = 139; /* DNACK: device does not acknowledge command error */
+            CPU_SetN;
+            CPU_regA = 0;
+            MEMORY_dPutByte(0x023a, CPU_regY);
+            MEMORY_dPutByte(0x42, 0);
+            CPU_SetC;
+            CPU_regPC = 0xe459;
+            return;
+        } else {
+            not_connected_counter = 0; // Reset counter if connected
+        }
+    }
+	#endif
+
 
 	Log_print("SIO: Raw command dev:%02X cmd:%02X aux1:%02X aux2:%02X", devic, comnd, aux1, aux2);
 

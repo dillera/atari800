@@ -14,6 +14,7 @@
 #define SIO_NAK ('N')  /* Not Acknowledge / No Operation */
 #define SIO_ERR ('E')  /* Error */
 #define SIO_COMPLETE ('C') /* Complete */
+#define SIO_TIMEOUT ('T') /* Timeout waiting for response */
 
 /* Constants for SIO Buffer Size */
 #define SIO_BUFFER_SIZE 1024 /* Match NetSIO buffer size for safety */

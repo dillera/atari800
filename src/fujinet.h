@@ -14,19 +14,7 @@
 
 #include <stdbool.h> /* For bool type */
 #include <time.h>
-
-/* Define BOOL type if not already defined */
-#ifndef BOOL
-typedef int BOOL;
-#endif
-
-#ifndef TRUE
-#define TRUE 1
-#endif
-
-#ifndef FALSE
-#define FALSE 0
-#endif
+#include <stdio.h> /* Include stdio.h for FILE */
 
 /* Constants */
 #define BUFFER_SIZE 1024                 /* Size of UDP receive buffer */

@@ -23,6 +23,28 @@ typedef int BOOL;
 /* --- Constants --- */
 #define NETSIO_DEFAULT_CREDITS 3
 #define NETSIO_MAX_PACKET_SIZE 1024 /* Reflects UDP reality */
+
+/* NetSIO Packet Types */
+#define NETSIO_DEVICE_DISCONNECT    0xC0
+#define NETSIO_DEVICE_CONNECT       0xC1
+#define NETSIO_PING_REQUEST         0xC2
+#define NETSIO_PING_RESPONSE        0xC3
+#define NETSIO_ALIVE_REQUEST        0xC4
+#define NETSIO_ALIVE_RESPONSE       0xC5
+#define NETSIO_CREDIT_STATUS        0xC6
+#define NETSIO_CREDIT_UPDATE        0xC7
+
+#define NETSIO_SPEED_CHANGE         0x80
+#define NETSIO_ACKNOWLEDGE          0x83
+#define NETSIO_SYNC_RESPONSE        0x81 /* SIO Status byte follows */
+
+/* SIO Command encapsulation */
+#define NETSIO_COMMAND_ON           0x11
+#define NETSIO_COMMAND_OFF          0x12 /* No response expected */
+#define NETSIO_COMMAND_OFF_SYNC     0x18 /* Sync response expected */
+#define NETSIO_DATA_BLOCK           0x02 /* Data payload */
+#define NETSIO_DATA_ACK             0x06 /* Acknowledge data */
+
 #define NETSIO_BUFFER_SIZE 1024
 
 /* --- NetSIO State Management --- */

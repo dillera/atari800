@@ -27,29 +27,7 @@ extern socklen_t fujinet_client_len;
 /* Make available_credits global for use in FujiNet_SendSIOCommand */
 int available_credits = 0;
 
-/* --- NetSIO Protocol Codes --- */
-#define NETSIO_COMMAND_ON        0x11
-#define NETSIO_COMMAND_OFF       0x10
-#define NETSIO_COMMAND_OFF_SYNC  0x18
-#define NETSIO_DATA_BLOCK        0x02
-#define NETSIO_DATA_BYTE_SYNC    0x09
-#define NETSIO_DEVICE_DISCONNECT 0xC0
-#define NETSIO_DEVICE_CONNECT    0xC1
-#define NETSIO_PING_REQUEST      0xC2
-#define NETSIO_PING_RESPONSE     0xC3
-#define NETSIO_ALIVE_REQUEST     0xC4
-#define NETSIO_ALIVE_RESPONSE    0xC5
-#define NETSIO_CREDIT_STATUS     0xC6
-#define NETSIO_CREDIT_UPDATE     0xC7
-#define NETSIO_SYNC_RESPONSE     0x81
-#define NETSIO_REAL_SYNC_RESPONSE 0x82 /* Unused for now */
-#define NETSIO_SPEED_CHANGE      0x80 /* Unused for now */
-#define NETSIO_ACKNOWLEDGE       0x83 /* New packet type for acknowledging SPEED_CHANGE */
-#define NETSIO_DATA_ACK          0x07 /* New packet type for acknowledging data */
-
 /* --- NetSIO State Variables --- */
-static struct sockaddr_in current_client_addr;
-static socklen_t current_client_len = sizeof(current_client_addr);
 static int client_known = 0;
 static int initial_credit_sent = 0;
 static int handshake_complete = 0; /* NEW: handshake is only complete after DEVICE_CONNECT */
@@ -103,36 +81,18 @@ void FujiNet_NetSIO_InitState(void) {
 
 /* Check if a client is known and the initial handshake is complete. */
 BOOL FujiNet_NetSIO_IsClientConnected(void) {
-    Log_print("FujiNet_NetSIO_IsClientConnected: client_known=%d, initial_credit_sent=%d, handshake_complete=%d, available_credits=%d",
-              client_known, initial_credit_sent, handshake_complete, available_credits);
-
     if (!client_known) {
-        Log_print("FujiNet_NetSIO_IsClientConnected: Not connected - client_known is FALSE");
         return FALSE;
     }
     if (!initial_credit_sent) {
-        Log_print("FujiNet_NetSIO_IsClientConnected: Not connected - initial_credit_sent is FALSE");
         return FALSE;
     }
     if (!handshake_complete) {
-        Log_print("FujiNet_NetSIO_IsClientConnected: Not connected - handshake_complete is FALSE");
         return FALSE;
     }
     if (available_credits <= 0) {
-        Log_print("FujiNet_NetSIO_IsClientConnected: Not connected - no credits available");
-        /* Attempt to re-send 10,000 credits if we have none */
-        unsigned char credit_pkt[3] = {NETSIO_CREDIT_UPDATE, 0x27, 0x10};
-        /* 0x2710 = 10,000 credits, big endian (0x27, 0x10), 3 bytes for compatibility */
-        ssize_t sent_len = sendto(fujinet_sockfd, credit_pkt, sizeof(credit_pkt), 0,
-                                 (struct sockaddr *)&fujinet_client_addr, fujinet_client_len);
-        if (sent_len == sizeof(credit_pkt)) {
-            Log_print("FujiNet_NetSIO_IsClientConnected: Re-sent 10,000 credits to client");
-        } else {
-            Log_print("FujiNet_NetSIO_IsClientConnected: Failed to re-send credits (sent_len=%zd, errno=%d: %s)", sent_len, errno, strerror(errno));
-        }
         return FALSE;
     }
-    Log_print("FujiNet_NetSIO_IsClientConnected: All handshake requirements met (client_known, initial_credit_sent, handshake_complete, available_credits) - returning TRUE");
     return TRUE;
 }
 
@@ -143,8 +103,8 @@ BOOL FujiNet_NetSIO_GetClientAddr(struct sockaddr_in *client_addr, socklen_t *cl
         return FALSE;
     }
     
-    memcpy(client_addr, &current_client_addr, sizeof(current_client_addr));
-    *client_len = current_client_len;
+    memcpy(client_addr, &fujinet_client_addr, sizeof(fujinet_client_addr));
+    *client_len = fujinet_client_len;
     return TRUE;
 }
 
@@ -181,9 +141,9 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
         Log_print("NETSIO FLOW [CONNECTION]: Received PING_REQUEST (0xC2) from %s:%d", 
                  addr_str, ntohs(addr_in->sin_port));
 
-        /* Store client address for future communication */
-        memcpy(&current_client_addr, recv_addr, recv_addr_len);
-        current_client_len = recv_addr_len;
+        /* Store client address for future communication - USE GLOBAL VARS */
+        memcpy(&fujinet_client_addr, recv_addr, recv_addr_len); // Use global fujinet_client_addr
+        fujinet_client_len = recv_addr_len;                   // Use global fujinet_client_len
 
         /* Update client status */
         if (!client_known) {
@@ -225,8 +185,8 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
         
         /* Ensure we have this client stored */
         if (!client_known) {
-            memcpy(&current_client_addr, recv_addr, recv_addr_len);
-            current_client_len = recv_addr_len;
+            memcpy(&fujinet_client_addr, recv_addr, recv_addr_len); // Use global fujinet_client_addr
+            fujinet_client_len = recv_addr_len;                   // Use global fujinet_client_len
             client_known = 1;
             Log_print("NETSIO FLOW [CONNECTION]: Client information stored for future communication");
         }

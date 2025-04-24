@@ -71,9 +71,6 @@ atari800_SOURCES = \
 	crc32.c crc32.h \
 	devices.c devices.h \
 	esc.c esc.h \
-	fujinet.c fujinet.h \
-	fujinet_netsio.c fujinet_netsio.h \
-	fujinet_udp.c fujinet_udp.h \
 	gtia.c gtia.h \
 	img_tape.c img_tape.h \
 	log.c log.h \
@@ -88,7 +85,18 @@ atari800_SOURCES = \
 	sio.c sio.h \
 	sysrom.c sysrom.h \
 	util.c util.h
+
+
+if WITH_FUJINET
+atari800_SOURCES += \
+    fujinet.c fujinet.h \
+    fujinet_udp.c fujinet_udp.h \
+    fujinet_netsio.c fujinet_netsio.h
+endif
+
+
 atari800_LDADD =
+
 
 if A8_USE_SDL
 atari800_SOURCES += sdl/init.c sdl/init.h

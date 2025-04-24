@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <time.h>
 
 /* Ensure BOOL type is defined */
 #ifndef BOOL
@@ -81,7 +82,7 @@ BOOL FujiNet_UDP_Poll(int sockfd) {
     fds.events = POLLIN;
     fds.revents = 0;
 
-    ret = poll(&fds, 1, 0); /* 0 timeout = non-blocking */
+    ret = poll(&fds, 1, 5); /* 5ms timeout = slightly longer wait */
 
     if (ret < 0) {
         Log_print("FujiNet_UDP: poll error: %s", strerror(errno));
@@ -110,7 +111,30 @@ ssize_t FujiNet_UDP_Receive(int sockfd, unsigned char *buffer, size_t buffer_siz
         return -1;
     }
 
-    /* Enhanced logging of received packet */
+    /* --- BEGIN RAW PACKET LOGGING --- */
+    if (recv_len > 0) {
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &(client_addr->sin_addr), ip_str, INET_ADDRSTRLEN);
+        int port = ntohs(client_addr->sin_port);
+        time_t now = time(NULL);
+        struct tm* tm_info = localtime(&now);
+        char time_str[32];
+        strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
+        int i;
+        char hexbuf[256] = {0};
+        char asciibuf[129] = {0};
+        int hexpos = 0, asciipos = 0;
+        int loglen = (recv_len > 64) ? 64 : (int)recv_len;
+        for (i = 0; i < loglen; ++i) {
+            hexpos += sprintf(hexbuf + hexpos, "%02X ", buffer[i]);
+            asciibuf[asciipos++] = (buffer[i] >= 32 && buffer[i] <= 126) ? buffer[i] : '.';
+        }
+        asciibuf[asciipos] = '\0';
+        Log_print("[RAW UDP RX %s] %d bytes from %s:%d | HEX: %s| ASCII: %s%s", time_str, (int)recv_len, ip_str, port, hexbuf, asciibuf, (recv_len > 64) ? " ...(truncated)" : "");
+    }
+    /* --- END RAW PACKET LOGGING --- */
+
+    /* Existing logging of received packet */
     if (recv_len > 0) {
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &(client_addr->sin_addr), ip_str, INET_ADDRSTRLEN);
@@ -128,19 +152,16 @@ ssize_t FujiNet_UDP_Receive(int sockfd, unsigned char *buffer, size_t buffer_siz
             /* For all other packet types, log with direction indicator */
             Log_print("<<< FROM FUJINET [%s:%d]: Received %d bytes, packet type 0x%02X", 
                      ip_str, ntohs(client_addr->sin_port), (int)recv_len, buffer[0]);
-            
             /* Print hex dump for detailed debugging */
             if (recv_len <= 32) {  /* Only dump short packets to avoid log spam */
                 char hexbuf[128] = {0};
                 char asciibuf[33] = {0};
                 int i, hexpos = 0, asciipos = 0;
-                
                 for (i = 0; i < recv_len; i++) {
                     hexpos += sprintf(hexbuf + hexpos, "%02X ", buffer[i]);
                     asciipos += sprintf(asciibuf + asciipos, "%c", 
                                        (buffer[i] >= 32 && buffer[i] <= 126) ? buffer[i] : '.');
                 }
-                
                 Log_print("    Data: %s | %s", hexbuf, asciibuf);
             } else {
                 Log_print("    Packet too large to display (%d bytes)", (int)recv_len);

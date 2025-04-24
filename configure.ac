@@ -1341,17 +1341,13 @@ fi
 AM_CONDITIONAL([WANT_R_IO_DEVICE], test "$WANT_R_IO_DEVICE" = "yes")
 
 # Add FujiNet support
-A8_OPTION(fujinet,yes,
-          [Support FujiNet networking via NetSIO protocol (default=ON)],
-          USE_FUJINET,[Define to enable FujiNet support.]
-         )
-if [[ "$WANT_USE_FUJINET" = "yes" ]]; then
-    # Windows needs winsock library
-    if [[ "$a8_host" = "win" ]]; then
-        A8_NEED_LIB(ws2_32)
+AC_ARG_ENABLE(fujinet, AC_HELP_STRING([--enable-fujinet],[Enable experimental FujiNet device support (default=no)]), [
+    if test "$enableval" = yes; then
+        AC_DEFINE(USE_FUJINET, 1, [Define to enable FujiNet support])
     fi
-fi
-AM_CONDITIONAL([WANT_USE_FUJINET], test "$WANT_USE_FUJINET" = "yes")
+    enable_fujinet=$enableval
+], [enable_fujinet=no]) # Default to no
+AM_CONDITIONAL(WITH_FUJINET, test "$enable_fujinet" = yes)
 
 dnl Wrapup: export and write Makefile...
 
@@ -1458,41 +1454,9 @@ if [[ "$SUPPORTS_RDEVICE" = "yes" ]]; then
             echo "    Using R: with IP network support......: $WANT_R_NETWORK"
         fi
 fi
-echo "Using FujiNet support?................: $WANT_USE_FUJINET"
-if [[ "$a8_target" = default -a "$with_video" = sdl ]]; then
-    echo "Using on-screen keyboard?.............: $WANT_USE_UI_BASIC_ONSCREEN_KEYBOARD"
-    echo "Using OpenGL?.........................: $with_opengl"
-fi
-echo
-echo "Main build variables:"
-echo "    CC......: \"$CC\""
-echo "    ASFLAGS.: \"$CCASFLAGS\""
-echo "    CFLAGS..: \"$CFLAGS\""
-echo "    CPPFLAGS: \"$CPPFLAGS\""
-echo "    LDFLAGS.: \"$LDFLAGS\""
-echo "    LIBS....: \"$LIBS\""
-echo "-------------------------------------------------------"
+echo "Using FujiNet support?................: $enable_fujinet"
 
-if [[ "$WANT_VERY_SLOW" = "yes" ]]; then
-	echo
-	echo "IMPORTANT: --enable-veryslow provides a bit better performance"
-	echo "only when the compiled atari800 is run with the -refresh option."
-	if [[ "$WANT_FALCON_CPUASM" != "yes" ]]; then
-		if [[ "$WANT_MONITOR_BREAK" = "yes" ]]; then
-			echo "It is better to use --disable-monitorbreak."
-		fi
-		if [[ "$with_sound" != "no" ]]; then
-			echo "Try --without-sound, too."
-		fi
-		if [[ "$WANT_PAGED_ATTRIB" != "yes" ]]; then
-			echo "Have you tried --enable-pagedattrib ?"
-		fi
-		if [[ "$WANT_CYCLES_PER_OPCODE" != "yes" ]]; then
-			echo "Have you tried --enable-cyclesperopcode ?"
-		fi
-	fi
+echo "    Using monitor?....................: $enable_monitor"
+if [[ "$enable_monitor" = yes ]]; then
+    echo "    Using monitor assembler?..........: $enable_monitorasm"
 fi
-
-echo
-echo "Now run \"gmake\" or \"make\"."
-echo
