@@ -24,6 +24,7 @@
 #include "fujinet.h"
 #include "fujinet_udp.h"
 #include "fujinet_netsio.h"
+#include "sio.h"      /* For SIO constants and types */
 
 /* Global flag to pause CPU while waiting for FujiNet SIO response */
 int fujinet_WaitingForSync = FALSE;
@@ -59,7 +60,7 @@ BOOL FujiNet_Initialise(void) {
 
     /* Force SIO and Device patches off, similar to -nopatchall */
     Log_print("FujiNet: Forcing SIO and device patches OFF.");
-    ESC_enable_sio_patch = FALSE;
+    // ESC_enable_sio_patch = FALSE; /* ABLE ARCHER: Allow SIO patch for handler trigger */
     Devices_enable_h_patch = FALSE;
     Devices_enable_p_patch = FALSE;
     Devices_enable_r_patch = FALSE;
@@ -70,6 +71,23 @@ BOOL FujiNet_Initialise(void) {
     }
 
     FujiNet_NetSIO_InitState(); // Reset NetSIO protocol state
+
+#ifdef FUJINET_SIO_PATCH
+    {
+        /* Read original bytes for restoration and logging */
+        UBYTE sio_original_byte1 = PEEK(0xE459);
+        UBYTE sio_original_byte2 = PEEK(0xE45A);
+        UBYTE sio_original_byte3 = PEEK(0xE45B);
+        const int patch_location = 0xE459; /* SIOV vector location */
+        const int patch_target = FUJINET_SIO_HANDLER_ADDRESS;
+        Log_print("FujiNet_Initialise: Attempting to patch SIO vector at $%04X to jump to $%04X", patch_location, patch_target);
+        POKE(patch_location    , 0x4C); /* JMP instruction */
+        POKE(patch_location + 1, patch_target & 0xFF);        /* Low byte of target address */
+        POKE(patch_location + 2, (patch_target >> 8) & 0xFF); /* High byte of target address */
+        Log_print("FujiNet_Initialise: SIO vector patched. Original bytes at $%04X: %02X %02X %02X", patch_location, sio_original_byte1, sio_original_byte2, sio_original_byte3);
+        Log_print("FujiNet_Initialise: Patched SIO vector at $%04X now points to $%04X", patch_location, PEEK(patch_location+1) + (PEEK(patch_location+2)<<8));
+    }
+#endif /* FUJINET_SIO_PATCH */
 
     Log_print("FujiNet: Initialised successfully.");
     return TRUE;
@@ -171,6 +189,7 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
     int timeout_counter;
     int response_received = 0; /* Use int instead of bool for C89 */
     uint8_t status_code = 0xFF;
+    extern int available_credits; // Use the global available_credits from fujinet_netsio.c
 
     /* Determine device type for better logging */
     if (device_id >= 0x31 && device_id <= 0x38) {
@@ -239,59 +258,58 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
     }
 
     /* Send the entire command sequence with minimal delays between packets */
-    if (FujiNet_UDP_Send(fujinet_sockfd, on_cmd_buf, on_cmd_len, &client_addr, client_len) < 0) {
-        Log_print("FujiNet: Failed to send ON_CMD packet");
+    ssize_t sent_len;
+    int send_error = 0;
+    
+    // ON_CMD
+    sent_len = FujiNet_UDP_Send(fujinet_sockfd, on_cmd_buf, on_cmd_len, &client_addr, client_len);
+    if (sent_len == (ssize_t)on_cmd_len) {
+        available_credits--;
+        Log_print("FujiNet: ON_CMD sent, credits now %d", available_credits);
+    } else {
+        Log_print("FujiNet: Failed to send ON_CMD packet (errno=%d: %s)", errno, strerror(errno));
         return 'E';
     }
     Log_print("FujiNet: ON_CMD sent, delaying 1ms...");
     usleep(1000); /* Small 1ms delay to ensure proper packet separation */
     
-    /* Log data command packet */
+    // DATA_CMD
     if (data_cmd_len > 0) {
-        char hexbuf[128] = {0};
-        int i, hexpos = 0;
-        
-        for (i = 0; i < data_cmd_len && hexpos < 120; i++) {
-            hexpos += sprintf(hexbuf + hexpos, "%02X ", data_cmd_buf[i]);
+        sent_len = FujiNet_UDP_Send(fujinet_sockfd, data_cmd_buf, data_cmd_len, &client_addr, client_len);
+        if (sent_len == (ssize_t)data_cmd_len) {
+            available_credits--;
+            Log_print("FujiNet: DATA_CMD sent, credits now %d", available_credits);
+        } else {
+            Log_print("FujiNet: Failed to send DATA_CMD packet (errno=%d: %s)", errno, strerror(errno));
+            return 'E';
         }
-        
-        Log_print("FujiNet: DATA_CMD packet [%d bytes]: %s", (int)data_cmd_len, hexbuf);
     }
     
-    if (FujiNet_UDP_Send(fujinet_sockfd, data_cmd_buf, data_cmd_len, &client_addr, client_len) < 0) {
-        Log_print("FujiNet: Failed to send DATA_CMD packet");
-        return 'E';
-    }
-    Log_print("FujiNet: DATA_CMD sent");
-    
+    // DATA
     if (data_out_len > 0) {
         Log_print("FujiNet: Sending %d bytes of data", (int)data_out_len);
         usleep(1000); /* Small 1ms delay */
-        if (FujiNet_UDP_Send(fujinet_sockfd, data_out_buf, data_out_len, &client_addr, client_len) < 0) {
-            Log_print("FujiNet: Failed to send DATA packet");
+        sent_len = FujiNet_UDP_Send(fujinet_sockfd, data_out_buf, data_out_len, &client_addr, client_len);
+        if (sent_len == (ssize_t)data_out_len) {
+            available_credits--;
+            Log_print("FujiNet: DATA sent, credits now %d", available_credits);
+        } else {
+            Log_print("FujiNet: Failed to send DATA packet (errno=%d: %s)", errno, strerror(errno));
             return 'E';
         }
-        Log_print("FujiNet: DATA sent");
     }
     
-    /* Log off/sync packet */
+    // OFF/SYNC
     if (off_sync_len > 0) {
-        char hexbuf[128] = {0};
-        int i, hexpos = 0;
-        
-        for (i = 0; i < off_sync_len && hexpos < 120; i++) {
-            hexpos += sprintf(hexbuf + hexpos, "%02X ", off_sync_buf[i]);
+        sent_len = FujiNet_UDP_Send(fujinet_sockfd, off_sync_buf, off_sync_len, &client_addr, client_len);
+        if (sent_len == (ssize_t)off_sync_len) {
+            available_credits--;
+            Log_print("FujiNet: OFF/SYNC sent, credits now %d", available_credits);
+        } else {
+            Log_print("FujiNet: Failed to send OFF/SYNC packet (errno=%d: %s)", errno, strerror(errno));
+            return 'E';
         }
-        
-        Log_print("FujiNet: OFF_SYNC packet [%d bytes]: %s", (int)off_sync_len, hexbuf);
     }
-    
-    usleep(1000); /* Small 1ms delay */
-    if (FujiNet_UDP_Send(fujinet_sockfd, off_sync_buf, off_sync_len, &client_addr, client_len) < 0) {
-        Log_print("FujiNet: Failed to send OFF_SYNC packet");
-        return 'E';
-    }
-    Log_print("FujiNet: OFF_SYNC sent");
 
     Log_print("FujiNet: SIO sequence sent. Waiting for response (sync %d)...", sync_to_use);
 
@@ -371,6 +389,184 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
         return 'N';
     } else {
         return 'E';
+    }
+}
+
+/* Processes an SIO command directly via NetSIO, handling the full transaction.
+ * device_id, command, aux1, aux2: SIO command parameters.
+ * Returns: SIO completion code ('A', 'C', 'E', 'N'). */
+UBYTE FujiNet_ProcessSIO(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE aux2)
+{
+    UBYTE output_buffer[NETSIO_BUFFER_SIZE]; /* Buffer for data *to* device */
+    UBYTE input_buffer[NETSIO_BUFFER_SIZE];  /* Buffer for data *from* device */
+    int output_len = 0;
+    int input_len = 0; /* We expect NetSIO layer to fill this */
+    uint8_t status_code = 0;
+    BOOL is_write_cmd = FALSE;
+    BOOL success = FALSE;
+    extern SIO_State_t SIO; /* From sio.c */
+    extern int TransferStatus; /* From sio.c */
+
+    Log_print("FUJINET: FujiNet_ProcessSIO D:%02X C:%02X A1:%02X A2:%02X", device_id, command, aux1, aux2);
+
+    /* Define common SIO command types */
+    #define CMD_READ 0x52    /* 'R' */
+    #define CMD_WRITE 0x50   /* 'P' (PUT) or 'W' */
+    #define CMD_STATUS 0x53  /* 'S' */
+
+    /* Prepare output data if necessary (e.g., for WRITE command) */
+    is_write_cmd = (command == CMD_WRITE || command == 'W');
+    if (is_write_cmd) {
+        /* Copy data from SIO's global buffer (if it's ready to be sent) */
+        if (TransferStatus == SIO_SendFrame) {
+            memcpy(output_buffer, SIO.DataBuffer, SIO.DataLen);
+            output_len = SIO.DataLen;
+            Log_print("FUJINET: Preparing %d bytes for SIO WRITE", output_len);
+        } else {
+            Log_print("FUJINET: WARNING - SIO WRITE command but no data in SIO buffer (TransferStatus=%d)", TransferStatus);
+            /* Proceed anyway, maybe it's a 0-byte write? NetSIO should handle it */
+            output_len = 0;
+        }
+    }
+
+    /* Create a temporary packet/buffer for sending the command */
+    {
+        unsigned char on_cmd_buf[NETSIO_BUFFER_SIZE];
+        unsigned char data_cmd_buf[NETSIO_BUFFER_SIZE];
+        unsigned char data_out_buf[NETSIO_BUFFER_SIZE];
+        unsigned char off_sync_buf[NETSIO_BUFFER_SIZE];
+        size_t on_cmd_len = 0;
+        size_t data_cmd_len = 0;
+        size_t data_out_len = 0;
+        size_t off_sync_len = 0;
+        int sync_num;
+
+        /* Prepare the NetSIO command sequence */
+        sync_num = FujiNet_NetSIO_PrepareSIOCommandSequence(
+            device_id, command, aux1, aux2,
+            output_buffer, output_len,
+            on_cmd_buf, &on_cmd_len,
+            data_cmd_buf, &data_cmd_len,
+            data_out_buf, &data_out_len,
+            off_sync_buf, &off_sync_len
+        );
+
+        if (sync_num < 0) {
+            Log_print("FUJINET: Error preparing NetSIO command sequence");
+            return SIO_NAK;
+        }
+
+        /* Send the ON command */
+        if (on_cmd_len > 0) {
+            if (sendto(fujinet_sockfd, on_cmd_buf, on_cmd_len, 0,
+                       (struct sockaddr *)&fujinet_client_addr, fujinet_client_len) < 0) {
+                Log_print("FUJINET: Error sending NetSIO ON command");
+                return SIO_ERR;
+            }
+        }
+
+        /* Send the DATA command if needed */
+        if (data_cmd_len > 0) {
+            if (sendto(fujinet_sockfd, data_cmd_buf, data_cmd_len, 0,
+                       (struct sockaddr *)&fujinet_client_addr, fujinet_client_len) < 0) {
+                Log_print("FUJINET: Error sending NetSIO DATA command");
+                return SIO_ERR;
+            }
+        }
+
+        /* Send the DATA if needed */
+        if (data_out_len > 0) {
+            if (sendto(fujinet_sockfd, data_out_buf, data_out_len, 0,
+                       (struct sockaddr *)&fujinet_client_addr, fujinet_client_len) < 0) {
+                Log_print("FUJINET: Error sending NetSIO DATA");
+                return SIO_ERR;
+            }
+        }
+
+        /* Wait for response with polling */
+        {
+            unsigned char recv_buffer[NETSIO_BUFFER_SIZE];
+            ssize_t recv_len;
+            struct sockaddr_in from_addr;
+            socklen_t from_len = sizeof(from_addr);
+            fd_set readfds;
+            struct timeval tv;
+            int max_polls = 50; /* 5 seconds max wait (50 * 100ms) */
+            int poll_count = 0;
+
+            Log_print("FUJINET: Waiting for NetSIO response...");
+
+            while (poll_count < max_polls) {
+                FD_ZERO(&readfds);
+                FD_SET(fujinet_sockfd, &readfds);
+                tv.tv_sec = 0;
+                tv.tv_usec = 100000; /* 100ms timeout */
+
+                /* Check if data is available to read */
+                if (select(fujinet_sockfd + 1, &readfds, NULL, NULL, &tv) > 0) {
+                    recv_len = recvfrom(fujinet_sockfd, recv_buffer, sizeof(recv_buffer), 0,
+                                        (struct sockaddr *)&from_addr, &from_len);
+                    
+                    if (recv_len > 0) {
+                        /* Check if it's a sync response with our sync number */
+                        if (FujiNet_NetSIO_CheckSyncResponse(recv_buffer, recv_len, sync_num, &status_code)) {
+                            success = TRUE;
+                            
+                            /* Handle any data that might have come with the response */
+                            FujiNet_NetSIO_HandleSyncResponse(recv_buffer, recv_len, sync_num);
+                            
+                            /* If this is a read command and there is response data, copy it to SIO buffer */
+                            if (command == CMD_READ || command == CMD_STATUS) {
+                                if (FujiNet_NetSIO_IsResponseReady()) {
+                                    input_len = FujiNet_NetSIO_GetResponseData(SIO.DataBuffer, NETSIO_BUFFER_SIZE);
+                                    if (input_len > 0) {
+                                        SIO.DataLen = input_len;
+                                        TransferStatus = SIO_ReceiveFrame;
+                                        Log_print("FUJINET: Copied %d bytes to SIO buffer", input_len);
+                                    }
+                                }
+                            }
+                            
+                            break; /* Got what we needed, exit polling loop */
+                        }
+                    }
+                }
+                
+                poll_count++;
+            }
+
+            /* Send the OFF command */
+            if (off_sync_len > 0) {
+                if (sendto(fujinet_sockfd, off_sync_buf, off_sync_len, 0,
+                           (struct sockaddr *)&fujinet_client_addr, fujinet_client_len) < 0) {
+                    Log_print("FUJINET: Error sending NetSIO OFF command");
+                }
+            }
+
+            if (!success) {
+                Log_print("FUJINET: Timeout waiting for NetSIO response after %d polls", poll_count);
+                return SIO_ERR;
+            }
+        }
+    }
+
+    /* Map status code to SIO status */
+    Log_print("FUJINET: NetSIO command completed. Status: %d, Success: %d", status_code, success);
+
+    if (!success)
+        return SIO_ERR;
+
+    /* Basic NetSIO status mapping */
+    switch (status_code) {
+        case 0: /* NETSIO_STATUS_OK */
+            return SIO_ACK;
+        case 1: /* NETSIO_STATUS_COMPLETE */
+            return SIO_COMPLETE;
+        case 2: /* NETSIO_STATUS_NOT_IMPLEMENTED */
+        case 3: /* NETSIO_STATUS_UNKNOWN_DEVICE */
+            return SIO_NAK;
+        default:
+            return SIO_ERR;
     }
 }
 

@@ -24,6 +24,9 @@ extern BOOL fujinet_connected;
 extern struct sockaddr_in fujinet_client_addr;
 extern socklen_t fujinet_client_len;
 
+/* Make available_credits global for use in FujiNet_SendSIOCommand */
+int available_credits = 0;
+
 /* --- NetSIO Protocol Codes --- */
 #define NETSIO_COMMAND_ON        0x11
 #define NETSIO_COMMAND_OFF       0x10
@@ -49,8 +52,8 @@ static struct sockaddr_in current_client_addr;
 static socklen_t current_client_len = sizeof(current_client_addr);
 static int client_known = 0;
 static int initial_credit_sent = 0;
+static int handshake_complete = 0; /* NEW: handshake is only complete after DEVICE_CONNECT */
 static uint8_t current_sync_number = 0;
-static int available_credits = 0;
 
 /* --- Helper Functions --- */
 static void print_hex(const unsigned char *buf, size_t len) {
@@ -70,12 +73,27 @@ static void print_hex(const unsigned char *buf, size_t len) {
 
 #ifdef USE_FUJINET
 
+/* Add includes if not already present */
+#include "fujinet.h"
+#include "fujinet_udp.h"
+#include "sio.h" /* For SIO_ChkSum - needed for checksum calc if done here */
+
+/* Static variable to track the NetSIO sync number */
+static UBYTE netsio_sync_number = 0;
+
+/* Assume these exist in fujinet.c/h and are properly linked/visible */
+extern int fujinet_sockfd;
+extern struct sockaddr_in fujinet_client_addr;
+extern socklen_t fujinet_client_len;
+extern BOOL fujinet_connected;
+
 /* --- Function Implementations --- */
 
 /* Initialize the NetSIO protocol state. */
 void FujiNet_NetSIO_InitState(void) {
     client_known = FALSE;
     initial_credit_sent = FALSE;
+    handshake_complete = FALSE; /* NEW: initialize handshake_complete */
     available_credits = 0;
     current_sync_number = 0;
     
@@ -85,13 +103,37 @@ void FujiNet_NetSIO_InitState(void) {
 
 /* Check if a client is known and the initial handshake is complete. */
 BOOL FujiNet_NetSIO_IsClientConnected(void) {
-    /* For debugging purposes */
-    if (client_known && !initial_credit_sent) {
-        Log_print("FujiNet_NetSIO: Client known but initial credits not sent - partial connection");
+    Log_print("FujiNet_NetSIO_IsClientConnected: client_known=%d, initial_credit_sent=%d, handshake_complete=%d, available_credits=%d",
+              client_known, initial_credit_sent, handshake_complete, available_credits);
+
+    if (!client_known) {
+        Log_print("FujiNet_NetSIO_IsClientConnected: Not connected - client_known is FALSE");
+        return FALSE;
     }
-    
-    /* Only consider fully connected when both flags are true */
-    return client_known;
+    if (!initial_credit_sent) {
+        Log_print("FujiNet_NetSIO_IsClientConnected: Not connected - initial_credit_sent is FALSE");
+        return FALSE;
+    }
+    if (!handshake_complete) {
+        Log_print("FujiNet_NetSIO_IsClientConnected: Not connected - handshake_complete is FALSE");
+        return FALSE;
+    }
+    if (available_credits <= 0) {
+        Log_print("FujiNet_NetSIO_IsClientConnected: Not connected - no credits available");
+        /* Attempt to re-send 10,000 credits if we have none */
+        unsigned char credit_pkt[3] = {NETSIO_CREDIT_UPDATE, 0x27, 0x10};
+        /* 0x2710 = 10,000 credits, big endian (0x27, 0x10), 3 bytes for compatibility */
+        ssize_t sent_len = sendto(fujinet_sockfd, credit_pkt, sizeof(credit_pkt), 0,
+                                 (struct sockaddr *)&fujinet_client_addr, fujinet_client_len);
+        if (sent_len == sizeof(credit_pkt)) {
+            Log_print("FujiNet_NetSIO_IsClientConnected: Re-sent 10,000 credits to client");
+        } else {
+            Log_print("FujiNet_NetSIO_IsClientConnected: Failed to re-send credits (sent_len=%zd, errno=%d: %s)", sent_len, errno, strerror(errno));
+        }
+        return FALSE;
+    }
+    Log_print("FujiNet_NetSIO_IsClientConnected: All handshake requirements met (client_known, initial_credit_sent, handshake_complete, available_credits) - returning TRUE");
+    return TRUE;
 }
 
 /* Get the current client address (if known).
@@ -138,11 +180,11 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
     if (packet_type == NETSIO_PING_REQUEST) {
         Log_print("NETSIO FLOW [CONNECTION]: Received PING_REQUEST (0xC2) from %s:%d", 
                  addr_str, ntohs(addr_in->sin_port));
-        
+
         /* Store client address for future communication */
         memcpy(&current_client_addr, recv_addr, recv_addr_len);
         current_client_len = recv_addr_len;
-        
+
         /* Update client status */
         if (!client_known) {
             client_known = 1;
@@ -152,21 +194,19 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
             Log_print("NETSIO FLOW [CONNECTION]: Existing client ping from %s:%d", 
                      addr_str, ntohs(addr_in->sin_port));
         }
-        
-        /* Prepare PING response */
+
+        /* Prepare PING response + initial CREDIT_UPDATE (10,000 credits) */
         response_buffer[0] = NETSIO_PING_RESPONSE;
-        
-        /* CRITICAL: Also send initial credit update in the same packet */
         response_buffer[1] = NETSIO_CREDIT_UPDATE;
-        response_buffer[2] = DEFAULT_CREDITS;
-        *response_len = 3;
-        
+        response_buffer[2] = 0x10; // Low byte (10,000)
+        response_buffer[3] = 0x27; // High byte (10,000)
+        *response_len = 4;
+
         /* Set credits immediately */
         initial_credit_sent = 1;
-        available_credits = DEFAULT_CREDITS;
-        Log_print("NETSIO FLOW [CONNECTION]: Sending PING_RESPONSE (0xC3) with %d initial credits", 
-                 DEFAULT_CREDITS);
-        
+        available_credits = 10000;
+        Log_print("NETSIO FLOW [CONNECTION]: Sending PING_RESPONSE (0xC3) with 10,000 initial credits");
+
         return TRUE;
     }
     
@@ -180,7 +220,7 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
     
     /* Handle device connect notification - completes connection handshake */
     if (packet_type == NETSIO_DEVICE_CONNECT) {
-        Log_print("NETSIO FLOW [CONNECTION]: Received DEVICE_CONNECT (0xC1) from %s:%d - Connection complete!", 
+        Log_print("NETSIO FLOW [CONNECTION]: Received DEVICE_CONNECT (0xC1) from %s:%d - Handshake complete!", 
                  addr_str, ntohs(addr_in->sin_port));
         
         /* Ensure we have this client stored */
@@ -190,6 +230,10 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
             client_known = 1;
             Log_print("NETSIO FLOW [CONNECTION]: Client information stored for future communication");
         }
+        
+        /* NEW: Set handshake_complete flag */
+        handshake_complete = 1;
+        Log_print("NETSIO FLOW [CONNECTION]: Handshake complete flag set");
         
         /* No response needed for DEVICE_CONNECT */
         return FALSE;
@@ -201,21 +245,22 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
     if (packet_type == NETSIO_CREDIT_STATUS) {
         Log_print("NETSIO FLOW [CREDIT]: Received CREDIT_STATUS (0xC6) from %s:%d - Client needs more credits", 
                  addr_str, ntohs(addr_in->sin_port));
-        
-        response_buffer[0] = NETSIO_CREDIT_UPDATE;
-        response_buffer[1] = DEFAULT_CREDITS;
-        *response_len = 2;
-        
-        /* Ensure credits are available and initial_credit_sent is true */
+
+        /* Prepare CREDIT_UPDATE response */
+        response_buffer[0] = NETSIO_CREDIT_UPDATE; // 0xC7
+        response_buffer[1] = 0x10; // Low byte
+        response_buffer[2] = 0x27; // High byte
+        *response_len = 3;
+
+        /* Ensure initial_credit_sent is set */
         if (!initial_credit_sent) {
-            Log_print("NETSIO FLOW [CREDIT]: First credit allocation");
             initial_credit_sent = 1;
+            Log_print("NETSIO FLOW [CREDIT]: First credit allocation after handshake");
         }
-        
-        available_credits = DEFAULT_CREDITS;
-        Log_print("NETSIO FLOW [CREDIT]: Sending CREDIT_UPDATE (0xC7) with %d credits", 
-                 DEFAULT_CREDITS);
-        
+
+        /* Optionally update internal credit state */
+        available_credits += 10000;
+        Log_print("NETSIO FLOW [CREDIT]: Sent CREDIT_UPDATE (0xC7) granting 10000 credits");
         return TRUE;
     }
     
@@ -237,9 +282,10 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
     
     /* Handle ALIVE request - keep connection active */
     if (packet_type == NETSIO_ALIVE_REQUEST) {
-        Log_print("NETSIO FLOW [ALIVE]: Received ALIVE_REQUEST (0xC4) from %s:%d", 
+        Log_print("NETSIO FLOW [ALIVE]: Received ALIVE_REQUEST (0xC4) from %s:%d",
                  addr_str, ntohs(addr_in->sin_port));
-        
+        Log_print("NETSIO FLOW [ALIVE]: Setting ALIVE received flag (for debug)");
+        /* Optionally set a static flag for ALIVE seen, for future handshake tracking */
         response_buffer[0] = NETSIO_ALIVE_RESPONSE;
         *response_len = 1;
         
@@ -332,7 +378,7 @@ int FujiNet_NetSIO_PrepareSIOCommandSequence(
     uint8_t sync_num;
     
     /* Basic validation */
-    if (!client_known || !initial_credit_sent || available_credits <= 0) {
+    if (!client_known || !initial_credit_sent || !handshake_complete || available_credits <= 0) {
         Log_print("FujiNet_NetSIO: Cannot prepare command - client not ready or no credits");
         return -1;
     }
@@ -349,6 +395,16 @@ int FujiNet_NetSIO_PrepareSIOCommandSequence(
     sync_num = current_sync_number++;
     Log_print("FujiNet_NetSIO: Preparing SIO command for device 0x%02X, command 0x%02X with sync %d",
              device_id, command, sync_num);
+    
+    // In the SIO command send path, decrement available_credits only if sendto/FujiNet_UDP_Send returns expected length
+    // We'll patch this in FujiNet_SendSIOCommand and FujiNet_ProcessSIO, but here is the correct pattern:
+    // ssize_t sent_len = FujiNet_UDP_Send(...);
+    // if (sent_len == expected_len) {
+    //     available_credits--;
+    // } else {
+    //     Log_print("ERROR: sendto() failed: %s (errno=%d)", strerror(errno), errno);
+    // }
+    // (Apply this in all SIO command send logic)
     
     /* Decrement available credits */
     available_credits--;
@@ -498,142 +554,54 @@ void FujiNet_NetSIO_Frame(void) {
     }
 }
 
-/*
- * Forwards an Atari SIO command frame to the connected FujiNet device via NetSIO.
- * Constructs and sends the required three UDP packets.
- * Returns TRUE on success, FALSE on failure.
- */
-BOOL FujiNet_NetSIO_ForwardSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE aux2) {
-    unsigned char cmd_on_buffer[2];
-    unsigned char data_cmd_buffer[10];
-    unsigned char data_out_buffer[2]; /* Just for ACK, no actual output data */
-    unsigned char off_sync_buffer[5];
-    size_t cmd_on_len, data_cmd_len, data_out_len, off_sync_len;
-    int sync_num;
-    uint8_t status_code = 0;
-    struct sockaddr_in client_addr;
-    socklen_t client_len;
-    unsigned char recv_buffer[BUFFER_SIZE];
-    ssize_t recv_len;
-    int max_attempts = 3;
-    int attempt;
-    
+/* OLD IMPLEMENTATION REMOVED (Lines 519-650) */
+
+/* Implementation of the forwarding function */
+void FujiNet_NetSIO_ForwardSIOCommand(const UBYTE sio_frame[4], UBYTE checksum) {
+    UBYTE packet1_payload[1];
+    UBYTE packet2_payload[6];
+    UBYTE packet3_payload[2];
+    ssize_t sent_len;
+
     if (!fujinet_connected || fujinet_sockfd < 0) {
-        Log_print("NETSIO FLOW [ERROR]: Cannot forward SIO command, FujiNet not connected.");
-        return FALSE;
+        Log_print("FujiNet_NetSIO: Cannot forward SIO command, not connected.");
+        return;
     }
-    
-    /* 0. Get client address */
-    if (!FujiNet_NetSIO_GetClientAddr(&client_addr, &client_len)) {
-        Log_print("NETSIO FLOW [ERROR]: Cannot forward SIO command, no client address known.");
-        return FALSE;
+
+    /* Increment sync number for each SIO command sequence */
+    netsio_sync_number++;
+
+    /* Packet 1: Start SIO transaction (0x11) */
+    packet1_payload[0] = 0x11;
+    Log_print("FujiNet_NetSIO: Sending SIO Start (0x11)");
+    sent_len = FujiNet_UDP_Send(fujinet_sockfd, packet1_payload, sizeof(packet1_payload), &fujinet_client_addr, fujinet_client_len);
+    if (sent_len != sizeof(packet1_payload)) {
+        Log_print("FujiNet_NetSIO: Error sending SIO Start packet");
+        /* Consider how to handle partial failures */
     }
-    
-    /* 1. Prepare the NetSIO command sequence */
-    Log_print("NETSIO FLOW [SIO]: Forwarding SIO command - Device: 0x%02X, Command: 0x%02X, AUX1: 0x%02X, AUX2: 0x%02X", 
-             device_id, command, aux1, aux2);
-             
-    sync_num = FujiNet_NetSIO_PrepareSIOCommandSequence(
-        device_id, command, aux1, aux2,
-        NULL, 0, /* No output data for standard command */
-        cmd_on_buffer, &cmd_on_len,
-        data_cmd_buffer, &data_cmd_len,
-        data_out_buffer, &data_out_len,
-        off_sync_buffer, &off_sync_len
-    );
-    
-    if (sync_num < 0) {
-        Log_print("NETSIO FLOW [ERROR]: Failed to prepare NetSIO command sequence.");
-        return FALSE;
+
+    /* Packet 2: SIO Command Frame (0x02, dev, cmd, aux1, aux2, checksum) */
+    packet2_payload[0] = 0x02;
+    memcpy(&packet2_payload[1], sio_frame, 4); /* Copy dev, cmd, aux1, aux2 */
+    packet2_payload[5] = checksum;
+    Log_print("FujiNet_NetSIO: Sending SIO Command Frame (0x02 Dev:%02X Cmd:%02X A1:%02X A2:%02X Ck:%02X)",
+              sio_frame[0], sio_frame[1], sio_frame[2], sio_frame[3], checksum);
+    sent_len = FujiNet_UDP_Send(fujinet_sockfd, packet2_payload, sizeof(packet2_payload), &fujinet_client_addr, fujinet_client_len);
+     if (sent_len != sizeof(packet2_payload)) {
+        Log_print("FujiNet_NetSIO: Error sending SIO Command Frame packet");
     }
-    
-    Log_print("NETSIO FLOW [SIO]: Using sync number %d for this command", sync_num);
-    
-    /* 2. Send the NetSIO command sequence */
-    /* Send COMMAND_ON packet */
-    Log_print("NETSIO FLOW [SIO]: Sending COMMAND_ON (0x11) packet...");
-    if (FujiNet_UDP_Send(fujinet_sockfd, cmd_on_buffer, cmd_on_len, 
-                        &client_addr, client_len) != (ssize_t)cmd_on_len) {
-        Log_print("NETSIO FLOW [ERROR]: Failed to send COMMAND_ON packet.");
-        return FALSE;
+
+    /* Packet 3: End SIO transaction (0x81, syncNumber) */
+    packet3_payload[0] = 0x81;
+    packet3_payload[1] = netsio_sync_number;
+    Log_print("FujiNet_NetSIO: Sending SIO End (0x81, Sync:%02X)", netsio_sync_number);
+    sent_len = FujiNet_UDP_Send(fujinet_sockfd, packet3_payload, sizeof(packet3_payload), &fujinet_client_addr, fujinet_client_len);
+     if (sent_len != sizeof(packet3_payload)) {
+        Log_print("FujiNet_NetSIO: Error sending SIO End packet");
     }
-    
-    /* Send DATA_BLOCK for command frame */
-    Log_print("NETSIO FLOW [SIO]: Sending DATA_BLOCK (0x02) packet with command frame...");
-    if (FujiNet_UDP_Send(fujinet_sockfd, data_cmd_buffer, data_cmd_len, 
-                        &client_addr, client_len) != (ssize_t)data_cmd_len) {
-        Log_print("NETSIO FLOW [ERROR]: Failed to send command DATA_BLOCK packet.");
-        return FALSE;
-    }
-    
-    /* Send DATA_ACK or DATA_BLOCK for output data */
-    Log_print("NETSIO FLOW [SIO]: Sending DATA_ACK (0x07) packet...");
-    if (FujiNet_UDP_Send(fujinet_sockfd, data_out_buffer, data_out_len, 
-                        &client_addr, client_len) != (ssize_t)data_out_len) {
-        Log_print("NETSIO FLOW [ERROR]: Failed to send DATA_ACK packet.");
-        return FALSE;
-    }
-    
-    /* Send COMMAND_OFF with sync number */
-    Log_print("NETSIO FLOW [SIO]: Sending COMMAND_OFF_SYNC (0x18) packet with sync %d...", sync_num);
-    if (FujiNet_UDP_Send(fujinet_sockfd, off_sync_buffer, off_sync_len, 
-                        &client_addr, client_len) != (ssize_t)off_sync_len) {
-        Log_print("NETSIO FLOW [ERROR]: Failed to send COMMAND_OFF_SYNC packet.");
-        return FALSE;
-    }
-    
-    /* 3. Wait for SYNC_RESPONSE with matching sync number */
-    Log_print("NETSIO FLOW [SIO]: Waiting for SYNC_RESPONSE (0x81) with sync %d...", sync_num);
-    
-    /* Set the flag that we're waiting for a FujiNet response */
-    fujinet_WaitingForSync = TRUE;
-    
-    for (attempt = 0; attempt < max_attempts; attempt++) {
-        /* Use non-blocking calls with a timeout to avoid freezing the emulator */
-        int timeout_ms = 250; /* 250ms timeout per attempt */
-        
-        /* Poll with a simple timeout approach */
-        int poll_ready = FujiNet_UDP_Poll(fujinet_sockfd);
-        if (!poll_ready) {
-            /* Sleep a bit (this is a simple approach - in a real implementation 
-               you might want to use a proper timeout mechanism) */
-            Log_print("NETSIO FLOW [SIO]: No response yet (attempt %d/%d), waiting...", 
-                     attempt+1, max_attempts);
-            PLATFORM_Sleep(timeout_ms);
-            continue;
-        }
-        
-        /* Data available, try to receive */
-        recv_len = FujiNet_UDP_Receive(fujinet_sockfd, recv_buffer, sizeof(recv_buffer), 
-                                       &client_addr, &client_len);
-        
-        if (recv_len <= 0) {
-            Log_print("NETSIO FLOW [ERROR]: Error receiving response.");
-            continue;
-        }
-        
-        /* Check if this is the SYNC_RESPONSE we're waiting for */
-        if (FujiNet_NetSIO_CheckSyncResponse(recv_buffer, recv_len, sync_num, &status_code)) {
-            Log_print("NETSIO FLOW [SIO]: Received expected SYNC_RESPONSE for sync %d with status 0x%02X", 
-                     sync_num, status_code);
-            fujinet_WaitingForSync = FALSE;
-            return TRUE;
-        } else {
-            /* Process the packet anyway, as it might be a different type */
-            unsigned char dummy_resp[BUFFER_SIZE];
-            size_t dummy_resp_len;
-            
-            Log_print("NETSIO FLOW [SIO]: Received unexpected packet (not our sync response)");
-            FujiNet_NetSIO_ProcessPacket(recv_buffer, recv_len, 
-                                        (struct sockaddr *)&client_addr, client_len,
-                                        dummy_resp, &dummy_resp_len);
-        }
-    }
-    
-    /* Timeout reached without getting our sync response */
-    Log_print("NETSIO FLOW [ERROR]: Timeout waiting for SYNC_RESPONSE after %d attempts.", max_attempts);
-    fujinet_WaitingForSync = FALSE;
-    return FALSE;
+
+    /* TODO: Add logic here to store the pending syncNumber and associate */
+    /* it with the expected SIO response handling. */
 }
 
 /* Global flag to indicate waiting for NetSIO sync response - defined in fujinet.h */
