@@ -9,6 +9,12 @@
 
 #define SIO_MAX_DRIVES 8
 
+/* SIO Status Bytes */
+#define SIO_ACK ('A')  /* Acknowledge */
+#define SIO_NAK ('N')  /* Not Acknowledge / No Operation */
+#define SIO_ERR ('E')  /* Error */
+#define SIO_COMPLETE ('C') /* Complete */
+
 typedef enum SIO_tagUnitStatus {
 	SIO_OFF,
 	SIO_NO_DISK,
@@ -58,5 +64,15 @@ int SIO_WriteStatusBlock(int unit, const UBYTE *buffer);
 int SIO_WriteSector(int unit, int sector, const UBYTE *buffer);
 void SIO_StateSave(void);
 void SIO_StateRead(void);
+
+#ifdef USE_FUJINET
+/* Forward SIO commands to FujiNet via NetSIO */
+int SIO_SendCommandToFujiNet(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE aux2,
+                            const UBYTE *output_buffer, int output_len,
+                            UBYTE *input_buffer, int *input_len_ptr);
+
+/* Control FujiNet tape motor */
+void SIO_SetFujiNetTapeMotor(int on_off);
+#endif /* USE_FUJINET */
 
 #endif	/* SIO_H_ */

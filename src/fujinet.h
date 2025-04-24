@@ -4,11 +4,16 @@
 
 #include "config.h" /* For Atari800 types like UBYTE */
 #include "atari.h" /* For Atari800 types */
-#include <time.h>
 
 #ifdef USE_FUJINET
 
+/* Include socket headers required for struct definitions and socklen_t */
+#include <sys/types.h> /* Often needed for socklen_t */
+#include <sys/socket.h>
+#include <netinet/in.h>
+
 #include <stdbool.h> /* For bool type */
+#include <time.h>
 
 /* Define BOOL type if not already defined */
 #ifndef BOOL
@@ -32,6 +37,12 @@ typedef int BOOL;
 #define DEFAULT_CREDITS 3
 #define NETSIO_MAX_PACKET_SIZE 1024 
 
+/* --- Global FujiNet State Variables (declared in fujinet.c) --- */
+extern int fujinet_sockfd;
+extern BOOL fujinet_connected;
+extern struct sockaddr_in fujinet_client_addr;
+extern socklen_t fujinet_client_len;
+
 /* --- Public Function Prototypes --- */
 
 /* Flag to indicate if the emulator is waiting for a FujiNet SIO response */
@@ -47,6 +58,9 @@ void FujiNet_Shutdown(void);
 /* Checks for and processes incoming NetSIO packets.
  * Should be called periodically. */
 void FujiNet_Update(void);
+
+/* Test function to send a disk STATUS command to D1: device */
+void FujiNet_TestSIOStatus(void);
 
 /* Checks if a FujiNet device is currently considered connected. */
 BOOL FujiNet_IsConnected(void);

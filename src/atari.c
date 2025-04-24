@@ -23,7 +23,6 @@
 */
 
 #define _POSIX_C_SOURCE 199309L /* for nanosleep */
-
 #include "afile.h"
 #include "config.h"
 #include <stdio.h>
@@ -146,6 +145,10 @@
 #endif
 #ifdef SDL
 #include "sdl/init.h"
+#endif
+#ifdef USE_FUJINET
+#include "fujinet.h"
+static int fujinet_run_test_sio = FALSE; /* Flag to trigger SIO test */
 #endif
 
 int Atari800_machine_type = Atari800_MACHINE_XLXE;
@@ -956,6 +959,21 @@ int Atari800_Initialise(int *argc, char *argv[])
 	}
 #endif /* SOUND */
 
+#ifdef USE_FUJINET
+	/* Process any FujiNet specific arguments */
+	for (i = j = 1; i < *argc; i++) {
+		if (strcmp(argv[i], "-fujinet_test_sio") == 0) {
+			/* Will trigger a test SIO STATUS command to D1: after emulator initializes */
+			Log_print("FujiNet: Will execute test SIO STATUS command after initialization");
+			fujinet_run_test_sio = TRUE;
+			/* Don't copy this argument */
+			continue;
+		}
+		argv[j++] = argv[i];
+	}
+	*argc = j;
+#endif
+
 	return TRUE;
 }
 
@@ -1411,9 +1429,23 @@ void Atari800_Frame(void)
 			Atari800_Sync();
 #endif /* BENCHMARK */
 #endif /* LIBATARI800 */
+#ifdef USE_FUJINET
+	/* Run FujiNet SIO test if requested via command line */
+	if (fujinet_run_test_sio) {
+		/* Only run the test once */
+		fujinet_run_test_sio = FALSE;
+		/* Ensure FujiNet is initialized and has had a chance to connect */
+		if (FujiNet_IsConnected()) {
+			Log_print("FujiNet: Running requested SIO STATUS test command");
+			FujiNet_TestSIOStatus();
+		} else {
+			Log_print("FujiNet: Can't run test - not connected to FujiNet device");
+		}
+	}
+	/* Process NetSIO packets every frame to maintain connectivity */
+	FujiNet_Update();
+#endif
 }
-
-#endif /* __PLUS */
 
 #ifndef BASIC
 
@@ -1559,3 +1591,5 @@ void Atari800_SetTVMode(int mode)
 #endif /* SOUND */
 	}
 }
+
+#endif /* __PLUS */

@@ -1,6 +1,8 @@
 /* src/fujinet.c */
 #include "config.h"
 #include "atari.h"  /* For BOOL, TRUE, FALSE */
+#include "esc.h"      /* For ESC_enable_sio_patch */
+#include "devices.h"  /* For Devices_enable_*_patch */
 
 /* Include socket headers globally to avoid incomplete struct issues */
 #include <sys/socket.h>
@@ -27,7 +29,10 @@
 int fujinet_WaitingForSync = FALSE;
 
 /* --- Module State --- */
-static int fujinet_sockfd = -1;
+int fujinet_sockfd = -1;
+BOOL fujinet_connected = FALSE;
+struct sockaddr_in fujinet_client_addr;
+socklen_t fujinet_client_len = sizeof(struct sockaddr_in);
 
 static void print_hex_fuji(const unsigned char *buf, size_t len) {
     size_t i;
@@ -51,6 +56,13 @@ BOOL FujiNet_Initialise(void) {
         Log_print("FujiNet: Already initialised.");
         return TRUE;
     }
+
+    /* Force SIO and Device patches off, similar to -nopatchall */
+    Log_print("FujiNet: Forcing SIO and device patches OFF.");
+    ESC_enable_sio_patch = FALSE;
+    Devices_enable_h_patch = FALSE;
+    Devices_enable_p_patch = FALSE;
+    Devices_enable_r_patch = FALSE;
 
     fujinet_sockfd = FujiNet_UDP_Init(NETSIO_HUB_PORT);
     if (fujinet_sockfd < 0) {
@@ -76,7 +88,8 @@ BOOL FujiNet_IsConnected(void) {
     return FujiNet_NetSIO_IsClientConnected();
 }
 
-void FujiNet_Update(void) {
+void FujiNet_Update(void)
+{
     if (fujinet_sockfd < 0) return;
 
     while (FujiNet_UDP_Poll(fujinet_sockfd)) {
@@ -86,23 +99,55 @@ void FujiNet_Update(void) {
         ssize_t recv_len;
 
         recv_len = FujiNet_UDP_Receive(fujinet_sockfd, recv_buffer, BUFFER_SIZE,
-                                       &client_addr, &client_len);
+                                     &client_addr, &client_len);
 
         if (recv_len > 0) {
             unsigned char response_buffer[BUFFER_SIZE];
-            ssize_t response_len = 0;
+            size_t response_len = 0;
 
-            if (FujiNet_NetSIO_ProcessPacket(recv_buffer, recv_len, &client_addr, client_len,
-                                             response_buffer, &response_len)) 
+            if (FujiNet_NetSIO_ProcessPacket(recv_buffer, recv_len, (struct sockaddr *)&client_addr, client_len,
+                                           response_buffer, &response_len)) 
             {
                 if (response_len > 0) {
                     FujiNet_UDP_Send(fujinet_sockfd, response_buffer, response_len,
-                                      &client_addr, client_len);
+                                    &client_addr, client_len);
                 }
             }
         } else if (recv_len < 0) {
             break;
         }
+    }
+}
+
+void FujiNet_TestSIOStatus(void)
+{
+    UBYTE status_buffer[4]; /* Status command returns 4 bytes */
+    int result_len = 0;
+    char result;
+
+    Log_print("FujiNet: Sending test STATUS command to D1: (device 0x31)");
+    
+    /* Send STATUS command (0x53) to device 0x31 (D1:) */
+    /* For a STATUS command, AUX1 and AUX2 are typically 0 */
+    result = FujiNet_SendSIOCommand(0x31, 0x53, 0, 0, NULL, 0, status_buffer, &result_len);
+    
+    if (result == 'C') {
+        Log_print("FujiNet: STATUS command successful! Response %d bytes:", result_len);
+        if (result_len >= 4) {
+            Log_print("  Status: %02X %02X %02X %02X", 
+                status_buffer[0], status_buffer[1], 
+                status_buffer[2], status_buffer[3]);
+            
+            /* Interpret the status bytes */
+            Log_print("  Drive Status: %s, %s, %s",
+                (status_buffer[0] & 0x01) ? "Motor on" : "Motor off",
+                (status_buffer[0] & 0x04) ? "Write-protected" : "Writeable",
+                (status_buffer[0] & 0x02) ? "Double density" : "Single density");
+        } else {
+            Log_print("  Unexpected response length: %d", result_len);
+        }
+    } else {
+        Log_print("FujiNet: STATUS command failed with result: '%c'", result);
     }
 }
 
@@ -162,6 +207,11 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
         return 'E';
     }
 
+    /* Log client address */
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(client_addr.sin_addr), ip_str, INET_ADDRSTRLEN);
+    Log_print("FujiNet: Sending to client at %s:%d", ip_str, ntohs(client_addr.sin_port));
+
     sync_to_use = FujiNet_NetSIO_PrepareSIOCommandSequence(
                         device_id, command, aux1, aux2, output_buffer, output_len,
                         on_cmd_buf, &on_cmd_len,
@@ -176,12 +226,72 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
 
     Log_print("FujiNet: Sending SIO Cmd (Sync %d) via NetSIO...", sync_to_use);
 
-    if (FujiNet_UDP_Send(fujinet_sockfd, on_cmd_buf, on_cmd_len, &client_addr, client_len) < 0) return 'E';
-    if (FujiNet_UDP_Send(fujinet_sockfd, data_cmd_buf, data_cmd_len, &client_addr, client_len) < 0) return 'E';
-    if (data_out_len > 0) {
-        if (FujiNet_UDP_Send(fujinet_sockfd, data_out_buf, data_out_len, &client_addr, client_len) < 0) return 'E';
+    /* Log detailed packet contents */
+    if (on_cmd_len > 0) {
+        char hexbuf[128] = {0};
+        int i, hexpos = 0;
+        
+        for (i = 0; i < on_cmd_len && hexpos < 120; i++) {
+            hexpos += sprintf(hexbuf + hexpos, "%02X ", on_cmd_buf[i]);
+        }
+        
+        Log_print("FujiNet: ON_CMD packet [%d bytes]: %s", (int)on_cmd_len, hexbuf);
     }
-    if (FujiNet_UDP_Send(fujinet_sockfd, off_sync_buf, off_sync_len, &client_addr, client_len) < 0) return 'E';
+
+    /* Send the entire command sequence with minimal delays between packets */
+    if (FujiNet_UDP_Send(fujinet_sockfd, on_cmd_buf, on_cmd_len, &client_addr, client_len) < 0) {
+        Log_print("FujiNet: Failed to send ON_CMD packet");
+        return 'E';
+    }
+    Log_print("FujiNet: ON_CMD sent, delaying 1ms...");
+    usleep(1000); /* Small 1ms delay to ensure proper packet separation */
+    
+    /* Log data command packet */
+    if (data_cmd_len > 0) {
+        char hexbuf[128] = {0};
+        int i, hexpos = 0;
+        
+        for (i = 0; i < data_cmd_len && hexpos < 120; i++) {
+            hexpos += sprintf(hexbuf + hexpos, "%02X ", data_cmd_buf[i]);
+        }
+        
+        Log_print("FujiNet: DATA_CMD packet [%d bytes]: %s", (int)data_cmd_len, hexbuf);
+    }
+    
+    if (FujiNet_UDP_Send(fujinet_sockfd, data_cmd_buf, data_cmd_len, &client_addr, client_len) < 0) {
+        Log_print("FujiNet: Failed to send DATA_CMD packet");
+        return 'E';
+    }
+    Log_print("FujiNet: DATA_CMD sent");
+    
+    if (data_out_len > 0) {
+        Log_print("FujiNet: Sending %d bytes of data", (int)data_out_len);
+        usleep(1000); /* Small 1ms delay */
+        if (FujiNet_UDP_Send(fujinet_sockfd, data_out_buf, data_out_len, &client_addr, client_len) < 0) {
+            Log_print("FujiNet: Failed to send DATA packet");
+            return 'E';
+        }
+        Log_print("FujiNet: DATA sent");
+    }
+    
+    /* Log off/sync packet */
+    if (off_sync_len > 0) {
+        char hexbuf[128] = {0};
+        int i, hexpos = 0;
+        
+        for (i = 0; i < off_sync_len && hexpos < 120; i++) {
+            hexpos += sprintf(hexbuf + hexpos, "%02X ", off_sync_buf[i]);
+        }
+        
+        Log_print("FujiNet: OFF_SYNC packet [%d bytes]: %s", (int)off_sync_len, hexbuf);
+    }
+    
+    usleep(1000); /* Small 1ms delay */
+    if (FujiNet_UDP_Send(fujinet_sockfd, off_sync_buf, off_sync_len, &client_addr, client_len) < 0) {
+        Log_print("FujiNet: Failed to send OFF_SYNC packet");
+        return 'E';
+    }
+    Log_print("FujiNet: OFF_SYNC sent");
 
     Log_print("FujiNet: SIO sequence sent. Waiting for response (sync %d)...", sync_to_use);
 
@@ -198,14 +308,38 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
             recv_len = FujiNet_UDP_Receive(fujinet_sockfd, recv_buffer, BUFFER_SIZE, &resp_client_addr, &resp_client_len);
 
             if (recv_len > 0) {
+                /* Log each packet received during response wait */
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &(resp_client_addr.sin_addr), ip_str, INET_ADDRSTRLEN);
+                Log_print("FujiNet: Received packet from %s:%d (%d bytes, type 0x%02X)", 
+                         ip_str, ntohs(resp_client_addr.sin_port), (int)recv_len, recv_buffer[0]);
+                
+                /* Print first 16 bytes as hex for debugging */
+                if (recv_len > 0) {
+                    char hexbuf[128] = {0};
+                    int i, hexpos = 0;
+                    int max_bytes = recv_len > 16 ? 16 : recv_len;
+                    
+                    for (i = 0; i < max_bytes; i++) {
+                        hexpos += sprintf(hexbuf + hexpos, "%02X ", recv_buffer[i]);
+                    }
+                    
+                    Log_print("FujiNet: Packet data: %s%s", hexbuf, recv_len > 16 ? "..." : "");
+                }
+                
                 unsigned char dummy_resp_buf[1];
-                ssize_t dummy_resp_len = 0;
-                if (FujiNet_NetSIO_ProcessPacket(recv_buffer, recv_len, &resp_client_addr, resp_client_len,
-                                                 dummy_resp_buf, &dummy_resp_len)){
-                    if(dummy_resp_len > 0) FujiNet_UDP_Send(fujinet_sockfd, dummy_resp_buf, dummy_resp_len, &resp_client_addr, resp_client_len);
+                size_t dummy_resp_len = 0;
+                if (FujiNet_NetSIO_ProcessPacket(recv_buffer, recv_len, (struct sockaddr *)&resp_client_addr, resp_client_len,
+                                               dummy_resp_buf, &dummy_resp_len)){
+                    if(dummy_resp_len > 0) {
+                        Log_print("FujiNet: Sending %d byte response to packet", (int)dummy_resp_len);
+                        FujiNet_UDP_Send(fujinet_sockfd, dummy_resp_buf, dummy_resp_len, &resp_client_addr, resp_client_len);
+                    }
                 }
 
                 if (FujiNet_NetSIO_CheckSyncResponse(recv_buffer, recv_len, sync_to_use, &status_code)) {
+                    Log_print("FujiNet: Received sync response matching sync %d! Status code: 0x%02X", 
+                             sync_to_use, status_code);
                     fujinet_WaitingForSync = FALSE; /* Resume CPU emulation */
                     response_received = 1;
                     break;
