@@ -609,6 +609,19 @@ UBYTE FujiNet_ProcessSIO(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE aux2)
                     if (packet_type == NETSIO_ALIVE_REQUEST) {
                         print_packet(">>> TO FUJINET [ALIVE_RESP]", alive_resp, sizeof(alive_resp), &recv_client_addr);
                         FujiNet_UDP_Send(fujinet_sockfd, alive_resp, sizeof(alive_resp), &recv_client_addr, recv_client_len);
+                    } else if (packet_type == NETSIO_CREDIT_STATUS) {
+                        /* Handle Credit Status packet (0xC6) - update credit info if needed */
+                        /* Just acknowledge we received it - no response needed */
+                        Log_print("FUJINET: Received CREDIT_STATUS (0xC6) packet");
+                    } else if (packet_type == NETSIO_CREDIT_UPDATE) {
+                        /* Handle Credit Update packet (0xC7) - update credit info if needed */
+                        /* Just acknowledge we received it - no response needed */
+                        Log_print("FUJINET: Received CREDIT_UPDATE (0xC7) packet");
+                    } else if (packet_type == NETSIO_PING_REQUEST) {
+                        /* Handle ping request even during sync wait */
+                        unsigned char ping_resp[] = { NETSIO_PING_RESPONSE };
+                        Log_print("FUJINET: Received PING request, sending PING response");
+                        FujiNet_UDP_Send(fujinet_sockfd, ping_resp, sizeof(ping_resp), &recv_client_addr, recv_client_len);
                     } else if (packet_type == NETSIO_SYNC_RESPONSE && recv_sync_num == sync_num) {
                         if (recv_len >= 3) { /* Type + Sync + Status */
                             received_status_code = recv_buffer[2];
