@@ -5,11 +5,20 @@
 #include "devices.h"  /* For Devices_enable_*_patch */
 #include "sio.h"      /* For SIO constants and types */
 #include "fujinet_netsio.h" /* For NetSIO functions and constants */
+#include "fujinet_udp.h"
+
+/* Helper function prototype */
+long long get_time_ms(void);
+
+/* Forward declarations */
+static void print_hex_fuji(const unsigned char *buf, size_t len);
+static void print_packet(const char *prefix, const unsigned char *data, int len, const struct sockaddr_in *addr);
 
 /* Include socket headers globally to avoid incomplete struct issues */
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/time.h> /* Required for gettimeofday */
 
 #ifdef USE_FUJINET
 
@@ -19,7 +28,6 @@
 #include <unistd.h>
 #include <errno.h>
 #include <ctype.h> /* For isprint (might be needed for logging helpers) */
-#include <stdbool.h> /* Use bool, true, false */
 #include <stdint.h> /* For uint8_t */
 #include <sys/types.h>
 #include <sys/select.h>
@@ -27,18 +35,20 @@
 
 #include "log.h"      /* For Log_print() */
 #include "fujinet.h"
-#include "fujinet_udp.h"
 
 /* Global flag to pause CPU while waiting for FujiNet SIO response */
 int fujinet_WaitingForSync = FALSE;
 
 /* --- Module State --- */
 int fujinet_sockfd = -1;
-BOOL fujinet_connected = FALSE;
+int fujinet_connected = FALSE;
+int fujinet_enabled = FALSE; /* Flag indicating if FujiNet support is enabled */
 struct sockaddr_in fujinet_client_addr;
 socklen_t fujinet_client_len = sizeof(struct sockaddr_in);
 
 #define BUFFER_SIZE 1024
+
+#define FUJINET_SIO_TIMEOUT_MS 2000 /* 2 seconds timeout for SIO operations */
 
 static void print_hex_fuji(const unsigned char *buf, size_t len) {
     size_t i;
@@ -56,7 +66,18 @@ static void print_hex_fuji(const unsigned char *buf, size_t len) {
     fprintf(stderr, "\n");
 }
 
-BOOL FujiNet_Initialise(void) {
+static void print_packet(const char *prefix, const unsigned char *data, int len, const struct sockaddr_in *addr)
+{ 
+    /* C89: Declarations at top */
+    char ip_str[INET_ADDRSTRLEN]; /* Moved */
+
+    /* Use Log_print for consistency with emulator logging */
+    inet_ntop(addr->sin_family, &addr->sin_addr, ip_str, sizeof(ip_str));
+    Log_print("%s %s:%d, %d bytes:", prefix, ip_str, ntohs(addr->sin_port), len);
+    print_hex_fuji(data, len);
+}
+
+int FujiNet_Initialise(void) {
     Log_print("FujiNet: Initialising...");
     if (fujinet_sockfd >= 0) {
         Log_print("FujiNet: Already initialised.");
@@ -95,6 +116,7 @@ BOOL FujiNet_Initialise(void) {
 #endif /* FUJINET_SIO_PATCH */
 
     Log_print("FujiNet: Initialised successfully.");
+    fujinet_enabled = TRUE;  /* Set the global enabled flag */
     return TRUE;
 }
 
@@ -107,37 +129,45 @@ void FujiNet_Shutdown(void) {
     }
 }
 
-BOOL FujiNet_IsConnected(void) {
+int FujiNet_IsConnected(void) {
     return FujiNet_NetSIO_IsClientConnected();
 }
 
 void FujiNet_Update(void)
 {
-    Log_print("FujiNet_Update: Entered function."); // Added Log at entry
+    Log_print("FujiNet_Update: Entered function. Enabled=%d, Socket=%d", fujinet_enabled, fujinet_sockfd);
     if (fujinet_sockfd < 0) return;
 
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    ssize_t len;
+
+    unsigned char recv_buffer[BUFFER_SIZE];
+
+    Log_print("FujiNet_Update: Checking for UDP packets on socket %d", fujinet_sockfd);
     while (FujiNet_UDP_Poll(fujinet_sockfd)) {
         Log_print("FujiNet_Update: Poll detected incoming packet.");
-        unsigned char recv_buffer[BUFFER_SIZE];
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-        ssize_t recv_len;
-
-        recv_len = FujiNet_UDP_Receive(fujinet_sockfd, recv_buffer, BUFFER_SIZE,
+        len = FujiNet_UDP_Receive(fujinet_sockfd, recv_buffer, BUFFER_SIZE,
                                      &client_addr, &client_len);
 
-        if (recv_len > 0) {
+        if (len > 0) {
             // Log received packet type before processing
             char ip_str[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &(client_addr.sin_addr), ip_str, INET_ADDRSTRLEN);
-            Log_print("FujiNet_Update: Received %zd bytes from %s:%d, Packet Type: 0x%02X", 
-                      recv_len, ip_str, ntohs(client_addr.sin_port), recv_buffer[0]);
+            Log_print("[RAW UDP RX %02d:%02d:%02d] %zd bytes from %s:%d | HEX: %02X | ASCII: %c",
+                      0, 0, 0, /* Time placeholder */
+                      len, ip_str, ntohs(client_addr.sin_port), 
+                      recv_buffer[0], isprint(recv_buffer[0]) ? recv_buffer[0] : '.');
+            Log_print("<<< FROM FUJINET [%s:%d]: Received %zd bytes, packet type 0x%02X",
+                      ip_str, ntohs(client_addr.sin_port), len, recv_buffer[0]);
+            Log_print("    Data: %02X  | %c", 
+                      recv_buffer[0], isprint(recv_buffer[0]) ? recv_buffer[0] : '.');
 
             unsigned char response_buffer[BUFFER_SIZE];
             size_t response_len = 0;
 
             // Process the packet and check if a response is needed
-            BOOL should_respond = FujiNet_NetSIO_ProcessPacket(recv_buffer, recv_len, (struct sockaddr *)&client_addr, client_len,
+            BOOL should_respond = FujiNet_NetSIO_ProcessPacket(recv_buffer, len, (struct sockaddr *)&client_addr, client_len,
                                                              response_buffer, &response_len);
             Log_print("FujiNet_Update: ProcessPacket returned should_respond=%d, response_len=%zu", should_respond, response_len);
 
@@ -154,10 +184,10 @@ void FujiNet_Update(void)
             } else {
                 Log_print("FujiNet_Update: No response needed for packet type 0x%02X.", recv_buffer[0]);
             }
-        } else if (recv_len < 0) {
+        } else if (len < 0) {
             Log_print("FujiNet_Update: FujiNet_UDP_Receive error occurred, breaking loop.");
             break; // Exit loop on receive error
-        } else { // recv_len == 0
+        } else { // len == 0
              Log_print("FujiNet_Update: Received 0 bytes (possible connection close indicator?), ignoring.");
         }
     }
@@ -215,8 +245,10 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
     size_t off_sync_len = 0;
     int timeout_counter;
     int response_received = 0; /* Use int instead of bool for C89 */
-    uint8_t status_code = 0xFF;
     extern int available_credits; // Use the global available_credits from fujinet_netsio.c
+    char expected_ip[INET_ADDRSTRLEN]; /* For address comparison/logging */
+    char received_ip[INET_ADDRSTRLEN]; /* For address comparison/logging */
+    char ip_str[INET_ADDRSTRLEN];      /* For general IP string handling */
 
     /* Determine device type for better logging */
     if (device_id >= 0x31 && device_id <= 0x38) {
@@ -254,7 +286,6 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
     }
 
     /* Log client address */
-    char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &(client_addr.sin_addr), ip_str, INET_ADDRSTRLEN);
     Log_print("FujiNet: Sending to client at %s:%d", ip_str, ntohs(client_addr.sin_port));
 
@@ -286,7 +317,6 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
 
     /* Send the entire command sequence with minimal delays between packets */
     ssize_t sent_len;
-    int send_error = 0;
     
     // ON_CMD
     sent_len = FujiNet_UDP_Send(fujinet_sockfd, on_cmd_buf, on_cmd_len, &client_addr, client_len);
@@ -343,6 +373,7 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
     timeout_counter = FUJINET_RESPONSE_TIMEOUT_MS;
 
     fujinet_WaitingForSync = TRUE; /* Pause CPU emulation */
+    uint8_t status_code = 0xFF; /* Moved declaration here */
     while (!response_received && timeout_counter > 0) {
         if (FujiNet_UDP_Poll(fujinet_sockfd)) {
             unsigned char recv_buffer[BUFFER_SIZE];
@@ -353,41 +384,63 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
             recv_len = FujiNet_UDP_Receive(fujinet_sockfd, recv_buffer, BUFFER_SIZE, &resp_client_addr, &resp_client_len);
 
             if (recv_len > 0) {
-                /* Log each packet received during response wait */
-                char ip_str[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &(resp_client_addr.sin_addr), ip_str, INET_ADDRSTRLEN);
-                Log_print("FujiNet: Received packet from %s:%d (%d bytes, type 0x%02X)", 
-                         ip_str, ntohs(resp_client_addr.sin_port), (int)recv_len, recv_buffer[0]);
-                
-                /* Print first 16 bytes as hex for debugging */
-                if (recv_len > 0) {
-                    char hexbuf[128] = {0};
-                    int i, hexpos = 0;
-                    int max_bytes = recv_len > 16 ? 16 : recv_len;
-                    
-                    for (i = 0; i < max_bytes; i++) {
-                        hexpos += sprintf(hexbuf + hexpos, "%02X ", recv_buffer[i]);
-                    }
-                    
-                    Log_print("FujiNet: Packet data: %s%s", hexbuf, recv_len > 16 ? "..." : "");
-                }
-                
-                unsigned char dummy_resp_buf[1];
-                size_t dummy_resp_len = 0;
-                if (FujiNet_NetSIO_ProcessPacket(recv_buffer, recv_len, (struct sockaddr *)&resp_client_addr, resp_client_len,
-                                               dummy_resp_buf, &dummy_resp_len)){
-                    if(dummy_resp_len > 0) {
-                        Log_print("FujiNet: Sending %d byte response to packet", (int)dummy_resp_len);
-                        FujiNet_UDP_Send(fujinet_sockfd, dummy_resp_buf, dummy_resp_len, &resp_client_addr, resp_client_len);
-                    }
-                }
+                /* AFTER receiving packet, now do the address comparison */
+                inet_ntop(AF_INET, &fujinet_client_addr.sin_addr, expected_ip, sizeof(expected_ip));
+                inet_ntop(AF_INET, &resp_client_addr.sin_addr, received_ip, sizeof(received_ip));
 
-                if (FujiNet_NetSIO_CheckSyncResponse(recv_buffer, recv_len, sync_to_use, &status_code)) {
-                    Log_print("FujiNet: Received sync response matching sync %d! Status code: 0x%02X", 
-                             sync_to_use, status_code);
-                    fujinet_WaitingForSync = FALSE; /* Resume CPU emulation */
-                    response_received = 1;
-                    break;
+                /* Compare only IP addresses, not ports (ports may change on some systems) */
+                int ip_match = (memcmp(&resp_client_addr.sin_addr, &fujinet_client_addr.sin_addr, sizeof(struct in_addr)) == 0);
+                
+                if (ip_match) /* Only check if IP addresses match - ignore port number */
+                {
+                    /* Convert addresses to strings for comparison and logging */
+                    inet_ntop(AF_INET, &fujinet_client_addr.sin_addr, ip_str, sizeof(ip_str));
+                    inet_ntop(AF_INET, &resp_client_addr.sin_addr, received_ip, sizeof(received_ip));
+
+                    /* For debugging: Print detailed address comparison */
+                    int expected_port = ntohs(fujinet_client_addr.sin_port);
+                    int received_port = ntohs(resp_client_addr.sin_port);
+                    Log_print("FUJINET DEBUG: Comparing addresses - Expected %s:%d, Received %s:%d", 
+                             expected_ip, expected_port, received_ip, received_port);
+                    
+                    /* Compare IP addresses (sin_addr) and ports (sin_port) */
+                    int ip_match = (memcmp(&resp_client_addr.sin_addr, &fujinet_client_addr.sin_addr, sizeof(struct in_addr)) == 0);
+                    Log_print("FUJINET DEBUG: Address comparison result - IP match: %d", ip_match);
+
+                    /* Log each packet received during response wait */
+                    Log_print("FujiNet: Received packet from %s:%d (%d bytes, type 0x%02X)", 
+                             received_ip, received_port, (int)recv_len, recv_buffer[0]);
+                    
+                    /* Print first 16 bytes as hex for debugging */
+                    if (recv_len > 0) {
+                        char hexbuf[128] = {0};
+                        int i, hexpos = 0;
+                        int max_bytes = recv_len > 16 ? 16 : recv_len;
+                        
+                        for (i = 0; i < max_bytes; i++) {
+                            hexpos += sprintf(hexbuf + hexpos, "%02X ", recv_buffer[i]);
+                        }
+                        
+                        Log_print("FujiNet: Packet data: %s%s", hexbuf, recv_len > 16 ? "..." : "");
+                    }
+                    
+                    unsigned char dummy_resp_buf[1];
+                    size_t dummy_resp_len = 0;
+                    if (FujiNet_NetSIO_ProcessPacket(recv_buffer, recv_len, (struct sockaddr *)&resp_client_addr, resp_client_len,
+                                                   dummy_resp_buf, &dummy_resp_len)){
+                        if(dummy_resp_len > 0) {
+                            Log_print("FujiNet: Sending %d byte response to packet", (int)dummy_resp_len);
+                            FujiNet_UDP_Send(fujinet_sockfd, dummy_resp_buf, dummy_resp_len, &resp_client_addr, resp_client_len);
+                        }
+                    }
+
+                    if (FujiNet_NetSIO_CheckSyncResponse(recv_buffer, recv_len, sync_to_use, &status_code)) {
+                        Log_print("FujiNet: Received sync response matching sync %d! Status code: 0x%02X", 
+                                 sync_to_use, status_code);
+                        fujinet_WaitingForSync = FALSE; /* Resume CPU emulation */
+                        response_received = 1;
+                        break;
+                    }
                 }
             }
         }
@@ -423,236 +476,232 @@ char FujiNet_SendSIOCommand(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE au
  * device_id, command, aux1, aux2: SIO command parameters.
  * Returns: SIO completion code ('A', 'C', 'E', 'N'). */
 UBYTE FujiNet_ProcessSIO(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE aux2)
-{
-    UBYTE output_buffer[NETSIO_BUFFER_SIZE]; /* Buffer for data *to* device */
-    UBYTE input_buffer[NETSIO_BUFFER_SIZE];  /* Buffer for data *from* device */
+{ 
+    /* --- Variable Declarations (C89) --- */
+    int is_write_cmd;
     int output_len = 0;
-    int input_len = 0; /* We expect NetSIO layer to fill this */
-    uint8_t status_code = 0;
-    BOOL is_write_cmd = FALSE;
-    UBYTE sio_result = SIO_TIMEOUT; /* Default SIO result code */
-    extern SIO_State_t SIO; /* From sio.c */
-    extern int TransferStatus; /* From sio.c */
+    UBYTE output_buffer[NETSIO_BUFFER_SIZE]; /* Buffer for data *to* device (populated from SIO) */
 
+    UBYTE sync_num;
+    unsigned char on_cmd_buf[NETSIO_BUFFER_SIZE];
+    size_t on_cmd_len;
+    unsigned char data_cmd_buf[NETSIO_BUFFER_SIZE];
+    size_t data_cmd_len;
+    unsigned char data_out_buf[NETSIO_BUFFER_SIZE]; /* Dummy buffer for received data (handled by SIO.DataBuffer) */
+    size_t data_out_len;                           /* Dummy length */
+    unsigned char off_cmd_buf[NETSIO_BUFFER_SIZE]; /* For COMMAND_OFF or COMMAND_OFF_SYNC */
+    size_t off_cmd_len;
+
+    int success = FALSE;
+
+    long long start_time_ms = 0;
+    long long current_time_ms = 0;
+
+    struct sockaddr_in recv_client_addr; /* Address of the received packet source */
+    socklen_t recv_client_len = sizeof(struct sockaddr_in); /* Initialize size for recvfrom */
+    ssize_t recv_len;
+    unsigned char recv_buffer[NETSIO_BUFFER_SIZE];
+    UBYTE packet_type;
+    UBYTE recv_sync_num;
+    UBYTE received_status_code;
+    int data_len;
+
+    /* IP address string buffers for comparison and logging */
+    char expected_ip[INET_ADDRSTRLEN];
+    char received_ip[INET_ADDRSTRLEN];
+
+    unsigned char alive_resp[] = { NETSIO_ALIVE_RESPONSE }; /* Moved declaration here */
+
+    /* --- Logic --- */
     Log_print("FUJINET: FujiNet_ProcessSIO D:%02X C:%02X A1:%02X A2:%02X", device_id, command, aux1, aux2);
 
-    /* Define common SIO command types */
-    #define CMD_READ 0x52    /* 'R' */
-    #define CMD_WRITE 0x50   /* 'P' (PUT) or 'W' */
-    #define CMD_STATUS 0x53  /* 'S' */
+    if (!fujinet_enabled || fujinet_sockfd < 0) {
+        Log_print("FUJINET: FujiNet not enabled or socket not initialised.");
+        return SIO_ERR;
+    }
 
-    /* Prepare output data if necessary (e.g., for WRITE command) */
-    is_write_cmd = (command == CMD_WRITE || command == 'W');
+    is_write_cmd = (command == 0x50 || command == 'W');
     if (is_write_cmd) {
-        /* Copy data from SIO's global buffer (if it's ready to be sent) */
         if (TransferStatus == SIO_SendFrame) {
-            memcpy(output_buffer, SIO.DataBuffer, SIO.DataLen);
-            output_len = SIO.DataLen;
+            if (SIO.DataLen > NETSIO_BUFFER_SIZE) {
+                Log_print("FUJINET: Warning - SIO output data (%d bytes) exceeds NetSIO buffer size (%d), truncating.", 
+                           SIO.DataLen, NETSIO_BUFFER_SIZE);
+                output_len = NETSIO_BUFFER_SIZE;
+            } else {
+                output_len = SIO.DataLen;
+            }
+            memcpy(output_buffer, SIO.DataBuffer, output_len);
             Log_print("FUJINET: Preparing %d bytes for SIO WRITE", output_len);
         } else {
             Log_print("FUJINET: WARNING - SIO WRITE command but no data in SIO buffer (TransferStatus=%d)", TransferStatus);
-            /* Proceed anyway, maybe it's a 0-byte write? NetSIO should handle it */
             output_len = 0;
         }
     }
 
-    /* Create a temporary packet/buffer for sending the command */
-    {
-        unsigned char on_cmd_buf[NETSIO_BUFFER_SIZE];
-        unsigned char data_cmd_buf[NETSIO_BUFFER_SIZE];
-        unsigned char data_out_buf[NETSIO_BUFFER_SIZE];
-        unsigned char off_sync_buf[NETSIO_BUFFER_SIZE];
-        size_t on_cmd_len = 0;
-        size_t data_cmd_len = 0;
-        size_t data_out_len = 0;
-        size_t off_sync_len = 0;
-        int sync_num;
+    sync_num = FujiNet_NetSIO_PrepareSIOCommandSequence(
+        device_id, command, aux1, aux2,
+        output_buffer, output_len,       /* Data *to* device */
+        on_cmd_buf, &on_cmd_len,         /* Buffer for COMMAND_ON */
+        data_cmd_buf, &data_cmd_len,     /* Buffer for SIO command */
+        data_out_buf, &data_out_len,     /* Buffer for SIO data *from* device (unused here) */
+        off_cmd_buf, &off_cmd_len        /* Buffer for COMMAND_OFF_SYNC */
+    );
 
-        /* Prepare the NetSIO command sequence */
-        sync_num = FujiNet_NetSIO_PrepareSIOCommandSequence(
-            device_id, command, aux1, aux2,
-            output_buffer, output_len,
-            on_cmd_buf, &on_cmd_len,
-            data_cmd_buf, &data_cmd_len,
-            data_out_buf, &data_out_len,
-            off_sync_buf, &off_sync_len
-        );
+    if (sync_num == 0xFF) { /* Check for error return (-1 might conflict with valid sync numbers) */
+        Log_print("FUJINET: Error preparing NetSIO command sequence");
+        return SIO_ERR;
+    }
 
-        if (sync_num < 0) {
-            Log_print("FUJINET: Error preparing NetSIO command sequence");
-            return SIO_NAK;
+    int send_ret; /* Restore for error checking */
+    send_ret = FujiNet_UDP_Send(fujinet_sockfd, on_cmd_buf, on_cmd_len, &fujinet_client_addr, fujinet_client_len);
+    if (send_ret != on_cmd_len) {
+        Log_print("FUJINET: Error sending COMMAND_ON packet (%d)", send_ret);
+        return SIO_ERR;
+    }
+    Log_print(">>> TO FUJINET [CLIENT]: Sent NetSIO Command On (Sync %d, len %zu)", sync_num, on_cmd_len);
+
+    send_ret = FujiNet_UDP_Send(fujinet_sockfd, data_cmd_buf, data_cmd_len, &fujinet_client_addr, fujinet_client_len);
+    if (send_ret != data_cmd_len) {
+          Log_print("FUJINET: Error sending DATA_BLOCK packet (%d)", send_ret);
+          return SIO_ERR;
+    }
+    Log_print(">>> TO FUJINET [CLIENT]: Sent NetSIO Data Block (Sync %d, len %zu)", sync_num, data_cmd_len);
+
+    if (off_cmd_len > 0) { 
+        send_ret = FujiNet_UDP_Send(fujinet_sockfd, off_cmd_buf, off_cmd_len, &fujinet_client_addr, fujinet_client_len);
+        if (send_ret != off_cmd_len) {
+            Log_print("FUJINET: Error sending COMMAND_OFF_SYNC packet (%d)", send_ret);
+            return SIO_ERR;
+        }
+        Log_print(">>> TO FUJINET [CLIENT]: Sent NetSIO Command Off Sync (Sync %d, len %zu)", sync_num, off_cmd_len);
+    } else {
+        Log_print("FUJINET: Warning - OFF_SYNC command was not prepared (len %zu). Did prepare sequence fail partially?", off_cmd_len);
+    }
+
+    start_time_ms = get_time_ms();
+    fujinet_WaitingForSync = TRUE; /* Indicate we are waiting for a response */
+
+    uint8_t status_code = 0xFF; /* Moved declaration here */
+    while (!success) {
+        current_time_ms = get_time_ms();
+        if (current_time_ms - start_time_ms > FUJINET_SIO_TIMEOUT_MS) {
+            Log_print("FUJINET: Timeout waiting for NetSIO response after %d ms for sync %d",
+                      FUJINET_SIO_TIMEOUT_MS, sync_num);
+            return SIO_TIMEOUT;
         }
 
-        /* Send the ON command */
-        if (on_cmd_len > 0) {
-            if (sendto(fujinet_sockfd, on_cmd_buf, on_cmd_len, 0,
-                       (struct sockaddr *)&fujinet_client_addr, fujinet_client_len) < 0) {
-                Log_print("FUJINET: Error sending NetSIO ON command");
-                return SIO_ERR;
-            }
-        }
+        if (FujiNet_UDP_Poll(fujinet_sockfd)) {
+            recv_len = FujiNet_UDP_Receive(fujinet_sockfd, recv_buffer, sizeof(recv_buffer), &recv_client_addr, &recv_client_len);
 
-        /* Send the DATA command if needed */
-        if (data_cmd_len > 0) {
-            if (sendto(fujinet_sockfd, data_cmd_buf, data_cmd_len, 0,
-                       (struct sockaddr *)&fujinet_client_addr, fujinet_client_len) < 0) {
-                Log_print("FUJINET: Error sending NetSIO DATA command");
-                return SIO_ERR;
-            }
-        }
+            if (recv_len > 0) {
+                inet_ntop(AF_INET, &fujinet_client_addr.sin_addr, expected_ip, sizeof(expected_ip));
+                inet_ntop(AF_INET, &recv_client_addr.sin_addr, received_ip, sizeof(received_ip));
 
-        /* Send the DATA if needed */
-        if (data_out_len > 0) {
-            if (sendto(fujinet_sockfd, data_out_buf, data_out_len, 0,
-                       (struct sockaddr *)&fujinet_client_addr, fujinet_client_len) < 0) {
-                Log_print("FUJINET: Error sending NetSIO DATA");
-                return SIO_ERR;
-            }
-        }
+                int ip_match = (memcmp(&recv_client_addr.sin_addr, &fujinet_client_addr.sin_addr, sizeof(struct in_addr)) == 0);
+                
+                if (ip_match)  /* Only check IP match - port numbers may change */
+                {
+                    packet_type = recv_buffer[0];
+                    recv_sync_num = (recv_len > 1) ? recv_buffer[1] : 0xFF; /* Basic sync check */
 
-        /* Wait for response with polling */
-        {
-            unsigned char recv_buffer[NETSIO_BUFFER_SIZE];
-            ssize_t recv_len;
-            struct sockaddr_in from_addr;
-            socklen_t from_len = sizeof(from_addr);
-            fd_set readfds;
-            struct timeval tv;
-            int max_polls = 50; /* 5 seconds max wait (50 * 100ms) */
-            int poll_count = 0;
-            BOOL success = FALSE; // Flag to indicate if we got the expected response
+                    Log_print("FUJINET: Received packet from expected client (sync %d).", sync_num);
 
-            Log_print("FUJINET: Waiting for NetSIO response for sync %d...", sync_num);
+                    if (packet_type == NETSIO_ALIVE_REQUEST) {
+                        print_packet(">>> TO FUJINET [ALIVE_RESP]", alive_resp, sizeof(alive_resp), &recv_client_addr);
+                        FujiNet_UDP_Send(fujinet_sockfd, alive_resp, sizeof(alive_resp), &recv_client_addr, recv_client_len);
+                    } else if (packet_type == NETSIO_SYNC_RESPONSE && recv_sync_num == sync_num) {
+                        if (recv_len >= 3) { /* Type + Sync + Status */
+                            received_status_code = recv_buffer[2];
+                            Log_print("FUJINET: Valid response received for sync %d (Type: 0x%02X, Status: 0x%02X)",
+                                      sync_num, packet_type, received_status_code);
+                            success = TRUE;
 
-            while (poll_count < max_polls && !success) { // Loop until success or timeout
-                FD_ZERO(&readfds);
-                FD_SET(fujinet_sockfd, &readfds);
-                tv.tv_sec = 0;
-                tv.tv_usec = 100000; /* 100ms timeout */
-
-                /* Check if data is available to read */
-                if (select(fujinet_sockfd + 1, &readfds, NULL, NULL, &tv) > 0) {
-                    recv_len = recvfrom(fujinet_sockfd, recv_buffer, sizeof(recv_buffer), 0,
-                                        (struct sockaddr *)&from_addr, &from_len);
-                    
-                    if (recv_len > 0) {
-                        // Compare source address with known FujiNet client address
-                        struct sockaddr_in *source_addr_in = (struct sockaddr_in *)&from_addr;
-                        struct sockaddr_in *client_addr_in = (struct sockaddr_in *)&fujinet_client_addr;
-
-                        // Check IP and Port match
-                        if (from_len == fujinet_client_len && // Check length first
-                            source_addr_in->sin_family == client_addr_in->sin_family &&
-                            source_addr_in->sin_addr.s_addr == client_addr_in->sin_addr.s_addr &&
-                            source_addr_in->sin_port == client_addr_in->sin_port)
-                        {
-                            // Packet is from the expected FujiNet client
-                            Log_print("FUJINET: Received packet from expected client (sync %d).", sync_num);
-                            
-                            /* Check if it's the sync response we're waiting for */
-                            if (FujiNet_NetSIO_CheckSyncResponse(recv_buffer, recv_len, sync_num, &status_code)) {
-                                success = TRUE;
-                                Log_print("FUJINET: Got valid sync response! Status: 0x%02X", status_code);
-
-                                // Handle received data if it was a READ command and we got a DATA_BLOCK
-                                if (command == CMD_READ && recv_buffer[0] == NETSIO_DATA_BLOCK && recv_len > 3) {
-                                    input_len = recv_len - 3; // Assuming header is 3 bytes (type, sync, status)
-                                    if (input_len > NETSIO_BUFFER_SIZE) input_len = NETSIO_BUFFER_SIZE; // Prevent overflow
-                                    memcpy(input_buffer, recv_buffer + 3, input_len);
-                                    Log_print("FUJINET: Copied %d bytes from DATA_BLOCK response.", input_len);
+                            if (packet_type == NETSIO_DATA_BLOCK && command == 0x52) {
+                                data_len = (int)(recv_len - 2); /* Cast ssize_t to int */
+                                if (data_len > 0) {
+                                    if (data_len > SIO_BUFFER_SIZE) data_len = SIO_BUFFER_SIZE;
+                                    memcpy(SIO.DataBuffer, recv_buffer + 2, data_len);
+                                    SIO.DataLen = data_len;
+                                    Log_print("FUJINET: Copied %d bytes from DATA_BLOCK to SIO buffer", data_len);
                                 } else {
-                                    input_len = 0; // No data payload for non-read or non-data-block responses
+                                    SIO.DataLen = 0;
                                 }
-                                // No break here, let loop condition handle exit
                             } else {
-                                // Valid packet from client, but not the sync response we wanted.
-                                // Could be ALIVE or other async message. Log and continue waiting.
-                                Log_print("FUJINET: Ignored unexpected packet type 0x%02X from client while waiting for sync %d.",
-                                          recv_buffer[0], sync_num);
+                                SIO.DataLen = 0; // No data expected or not a READ
                             }
                         } else {
-                            // Packet from an unexpected source (e.g., ourselves!)
-                            char unexpected_ip_str[INET_ADDRSTRLEN];
-                            inet_ntop(AF_INET, &(source_addr_in->sin_addr), unexpected_ip_str, INET_ADDRSTRLEN);
-                            Log_print("FUJINET: Ignored packet from unexpected source %s:%d while waiting for client sync %d.",
-                                      unexpected_ip_str, ntohs(source_addr_in->sin_port), sync_num);
+                            return SIO_ERR; /* Invalid sync response */
                         }
-                    } else if (recv_len < 0) {
-                         if (errno != EAGAIN && errno != EWOULDBLOCK) { // Ignore non-blocking errors
-                             perror("FUJINET: recvfrom failed during SIO wait");
-                             sio_result = SIO_ERR; // Set error status
-                             success = TRUE; // Exit loop on error
-                         }
-                    } else { // recv_len == 0 (Should not happen with UDP, but handle defensively)
-                         Log_print("FUJINET: Received 0 bytes during SIO wait?");
-                    }
-                } else { // select() timed out or returned error < 0
-                    // Timeout is handled by loop condition, select errors are rare here but could be logged
-                    if (select(fujinet_sockfd + 1, NULL, NULL, NULL, &tv) < 0) { // Check for actual error
-                        perror("FUJINET: select() error during SIO wait");
-                        sio_result = SIO_ERR;
-                        success = TRUE; // Exit loop on error
-                    }
-                }
-                poll_count++;
-            } // end while loop
-
-            /* --- Process Result --- */
-            if (!success && poll_count >= max_polls) { // Explicitly check for timeout
-                Log_print("FUJINET: Timeout waiting for NetSIO response after %d polls for sync %d", max_polls, sync_num);
-                sio_result = SIO_TIMEOUT; /* Set timeout status */
-                /* NOTE: Do NOT send OFF_SYNC on timeout, device might still be processing */
-            } else if (success) {
-                /* Send OFF/SYNC command */
-                if (off_sync_len > 0) {
-                    if (sendto(fujinet_sockfd, off_sync_buf, off_sync_len, 0,
-                           (struct sockaddr *)&fujinet_client_addr, fujinet_client_len) < 0) {
-                        Log_print("FUJINET: Error sending NetSIO OFF/SYNC command");
-                        /* Even if OFF fails, we received the response, so proceed with status */
                     } else {
-                         Log_print("FUJINET: Sent OFF/SYNC for sync %d", sync_num);
+                        Log_print("FUJINET: Ignoring non-sync packet from %s (type 0x%02X) while waiting for sync %d",
+                                 received_ip, packet_type, sync_num);
                     }
+                } else {
+                    Log_print("FUJINET: Ignoring packet from %s - Wrong source IP (expected %s) while waiting for sync %d",
+                             received_ip, expected_ip, sync_num);
                 }
-
-                /* Determine SIO result based on status_code */
-                switch (status_code) {
-                    case SIO_COMPLETE:  sio_result = SIO_COMPLETE; break;
-                    case SIO_ACK:       sio_result = SIO_ACK; break;
-                    case SIO_ERR:       sio_result = SIO_ERR; break;
-                    case SIO_NAK:       sio_result = SIO_NAK; break;
-                    case SIO_TIMEOUT:   sio_result = SIO_TIMEOUT; break; /* Device reported timeout */
-                    default:            sio_result = SIO_ERR; /* Treat unknown status as error */
-                                        Log_print("FUJINET: Received unknown status code 0x%02X ('%c')", status_code, isprint(status_code) ? status_code : '?');
-                                        break;
-                }
-
-                /* Handle data received for READ commands */
-                if (command == CMD_READ && sio_result == SIO_COMPLETE) { // Only copy data on success
-                    if (input_len > 0) {
-                        memcpy(SIO.DataBuffer, input_buffer, input_len);
-                        SIO.DataLen = input_len;
-                        TransferStatus = SIO_ReceiveFrame; /* Indicate data ready for OS */
-                        Log_print("FUJINET: SIO READ successful, %d bytes received.", input_len);
-                    } else {
-                        Log_print("FUJINET: SIO READ successful, but 0 bytes received.");
-                        SIO.DataLen = 0;
-                        TransferStatus = SIO_ReceiveFrame; /* Still indicate completion */
-                    }
-                } else if (command == CMD_WRITE && sio_result == SIO_COMPLETE) {
-                     TransferStatus = SIO_NoFrame; /* Write finished, no data transfer active */
-                     Log_print("FUJINET: SIO WRITE successful.");
-                } else if (sio_result != SIO_COMPLETE && sio_result != SIO_ACK) {
-                    /* On error, timeout, NAK etc. */
-                    TransferStatus = SIO_NoFrame;
-                }
-
-            } else { // Loop exited for reason other than success or timeout (e.g., select error)
-                 Log_print("FUJINET: SIO processing loop exited unexpectedly.");
-                 sio_result = SIO_ERR; 
+            } else if (recv_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                Log_print("FUJINET: Error receiving packet: %s (errno %d)", strerror(errno), errno);
             }
+        } else {
+            usleep(100); /* Sleep for 100 microseconds to prevent busy-waiting */
         }
     }
-    return sio_result;
+
+    if (success) {
+        unsigned char off_cmd_buf[1] = { NETSIO_COMMAND_OFF };
+        Log_print("FUJINET: Sending COMMAND_OFF (0x12) after successful sync %d", sync_num);
+        if (FujiNet_UDP_Send(fujinet_sockfd, off_cmd_buf, sizeof(off_cmd_buf),
+                         &fujinet_client_addr, fujinet_client_len) == sizeof(off_cmd_buf)) {
+             available_credits--; /* Consume credit ONLY if send was successful */
+        } else {
+             Log_print("FUJINET: Error sending COMMAND_OFF packet");
+        }
+
+        switch (received_status_code) {
+            case SIO_COMPLETE:  return SIO_COMPLETE; break;
+            case SIO_ACK:       return SIO_ACK; break;
+            case SIO_ERR:       return SIO_ERR; break;
+            case SIO_NAK:       return SIO_NAK; break;
+            case SIO_TIMEOUT:   return SIO_TIMEOUT; break; /* Device reported timeout */
+            default:            return SIO_ERR; /* Treat unknown status as error */
+                                Log_print("FUJINET: Received unknown status code 0x%02X ('%c')", received_status_code, isprint(received_status_code) ? received_status_code : '?');
+                                break;
+        }
+
+        if (command == 0x52 && received_status_code == SIO_COMPLETE) {
+             if (SIO.DataLen > 0) {
+                  TransferStatus = SIO_ReceiveFrame; /* Indicate data is ready */
+                  Log_print("FUJINET: SIO READ successful, %d bytes ready.", SIO.DataLen);
+             } else {
+                  TransferStatus = SIO_NoFrame; /* Complete, but no data? */
+                  Log_print("FUJINET: SIO READ successful, but no data received.");
+             }
+        } else if (command == 0x50 && received_status_code == SIO_COMPLETE) {
+             TransferStatus = SIO_NoFrame; /* Write finished, no data transfer active */
+             Log_print("FUJINET: SIO WRITE successful.");
+        } else if (received_status_code != SIO_COMPLETE && received_status_code != SIO_ACK) { 
+             TransferStatus = SIO_NoFrame; /* No frame pending after error */
+             Log_print("FUJINET: SIO command resulted in status %c (0x%02X).", received_status_code, received_status_code);
+        } else {
+             TransferStatus = SIO_NoFrame; /* Treat as no data transfer needed */
+             Log_print("FUJINET: SIO command ACK'd (Result: %c)", received_status_code);
+        }
+
+    } else { // Loop exited due to timeout
+        Log_print("FUJINET: SIO command timed out (Sync: %d)", sync_num);
+        return SIO_TIMEOUT;
+    }
+
+    fujinet_WaitingForSync = FALSE; /* No longer waiting */
+    return SIO_ERR;
+}
+
+long long get_time_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return ((long long)tv.tv_sec * 1000) + (tv.tv_usec / 1000);
 }
 
 #endif /* USE_FUJINET */
@@ -663,7 +712,7 @@ UBYTE FujiNet_ProcessSIO(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE aux2)
 #include "atari.h"
 #include "sio.h"   /* For UBYTE */
 
-BOOL FujiNet_Initialise(void) {
+int FujiNet_Initialise(void) {
     // Do nothing when FujiNet is disabled
     return FALSE;
 }
@@ -676,7 +725,7 @@ void FujiNet_Update(void) {
     // Do nothing when FujiNet is disabled
 }
 
-BOOL FujiNet_IsConnected(void) {
+int FujiNet_IsConnected(void) {
     // Always report disconnected when FujiNet is disabled
     return FALSE;
 }
