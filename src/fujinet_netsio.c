@@ -392,30 +392,29 @@ int FujiNet_NetSIO_PrepareSIOCommandSequence(
     
     /* 2. DATA_BLOCK for command frame */
     data_cmd_buf[0] = NETSIO_DATA_BLOCK;
-    data_cmd_buf[1] = 5; /* 5 bytes in command frame: device_id, command, aux1, aux2, 0xFF */
-    data_cmd_buf[2] = device_id;
-    data_cmd_buf[3] = command;
-    data_cmd_buf[4] = aux1;
-    data_cmd_buf[5] = aux2;
-    data_cmd_buf[6] = 0xFF; /* Extra byte required by FujiNet implementation */
-    *data_cmd_len = 7;
+    data_cmd_buf[1] = device_id;
+    data_cmd_buf[2] = command;
+    data_cmd_buf[3] = aux1;
+    data_cmd_buf[4] = aux2;
+    data_cmd_buf[5] = 0xFF; /* Extra byte required by FujiNet implementation */
+    *data_cmd_len = 6;
     Log_print("FujiNet_NetSIO: Prepared DATA_BLOCK packet with command frame: Device=0x%02X, Cmd=0x%02X, Aux1=0x%02X, Aux2=0x%02X",
              device_id, command, aux1, aux2);
     
     /* 3. Optional DATA_BLOCK for output data */
     if (output_buffer != NULL && output_len > 0) {
         size_t copy_len = output_len;
-        if (copy_len > BUFFER_SIZE - 3) { /* -3 to leave room for header and the extra 0xFF byte */
-            copy_len = BUFFER_SIZE - 3;
+        if (copy_len > BUFFER_SIZE - 2) { /* -2 to leave room for header byte and the extra 0xFF byte */
+            copy_len = BUFFER_SIZE - 2;
             Log_print("FujiNet_NetSIO: Warning - output data truncated from %d to %d bytes",
                      output_len, (int)copy_len);
         }
         
         data_out_buf[0] = NETSIO_DATA_BLOCK;
-        data_out_buf[1] = (uint8_t)copy_len;
-        memcpy(data_out_buf + 2, output_buffer, copy_len);
-        data_out_buf[copy_len + 2] = 0xFF; /* Extra byte required by FujiNet implementation */
-        *data_out_len = copy_len + 3;
+        /* Copy data directly after the header byte (no length byte) */
+        memcpy(data_out_buf + 1, output_buffer, copy_len);
+        data_out_buf[copy_len + 1] = 0xFF; /* Extra byte required by FujiNet implementation */
+        *data_out_len = copy_len + 2; /* 1 for header + data + 1 for 0xFF */
         Log_print("FujiNet_NetSIO: Prepared DATA_BLOCK packet with %d bytes of output data", (int)copy_len);
     } else {
         /* No output data, but we need to send a DATA_ACK to acknowledge receipt */
