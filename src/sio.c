@@ -1194,6 +1194,21 @@ void SIO_Handler(void)
 	CPU_regPC = 0xe459;
 }
 
+/* Fixed checksum Which ensures at most two 8-bit folds are applied — same as the standard 8-bit IP-style checksum fold */
+UBYTE SIO_ChkSum(const UBYTE *buffer, int length)
+{
+    unsigned int checksum = 0;
+    while (--length >= 0)
+        checksum += *buffer++;
+
+    checksum = (checksum & 0xFF) + (checksum >> 8);
+    checksum = (checksum & 0xFF) + (checksum >> 8); // in case there's a new carry
+
+    return checksum & 0xFF;
+}
+
+/* Flawed checksum that ignores hibyte */
+/*
 UBYTE SIO_ChkSum(const UBYTE *buffer, int length)
 {
 	int checksum = 0;
@@ -1204,6 +1219,8 @@ UBYTE SIO_ChkSum(const UBYTE *buffer, int length)
 	while (checksum > 255);
 	return checksum;
 }
+*/
+
 
 /* Enable/disable command frame processing */
 void SIO_SwitchCommandFrame(int onoff)
@@ -1263,30 +1280,41 @@ void SIO_SwitchCommandFrame(int onoff)
 }
 
 /* Intercept SIO command frames and forward to FujiNet if appropriate */
-static int SIO_ForwardToFujiNetIfNeeded(void)
+static int SIO_ForwardToFujiNetIfNeeded(void) /* Returns SIO status code if handled, -1 otherwise */
 {
 #ifdef USE_FUJINET
-	if (fujinet_connected) {
+	/* Check if FujiNet is initialized and connected */
+	if (fujinet_enabled && fujinet_sockfd >= 0 && FujiNet_NetSIO_IsClientConnected()) {
 		UBYTE device_id = CommandFrame[0];
-		if (device_id == 0x70 || (device_id >= 0x31 && device_id <= 0x34)) {
-			FujiNet_NetSIO_ForwardSIOCommand(CommandFrame, CommandFrame[4]);
-			Log_print("SIO: Forwarded command frame to FujiNet (device %02X)", device_id);
-			return 1; /* handled by FujiNet */
+		/* Check if device ID is for Tape (0x70) or Disk (0x31-0x38) */
+		if (device_id == 0x70 || (device_id >= 0x31 && device_id <= 0x38)) { /* TODO: Add check for Printer 0x40? */
+			UBYTE command = CommandFrame[1];
+			UBYTE aux1 = CommandFrame[2];
+			UBYTE aux2 = CommandFrame[3];
+			UBYTE status;
+
+			Log_print("SIO: Forwarding command to FujiNet D:%02X C:%02X A1:%02X A2:%02X", device_id, command, aux1, aux2);
+			status = FujiNet_ProcessSIO(device_id, command, aux1, aux2);
+			/* FujiNet_ProcessSIO now blocks and returns the SIO status */
+			/* TransferStatus should have been set by FujiNet_ProcessSIO if data transfer occurred */
+			Log_print("SIO: FujiNet returned status %c (0x%02X)", status, status);
+			return (int)status; /* Return SIO status code */
 		}
 	}
 #endif
-	return 0; /* not handled by FujiNet */
+	return -1; /* not handled by FujiNet */
 }
 
 /* Patch SIO_ProcessCommandFrame to call our forwarding routine and bypass local handling if needed */
 static UBYTE SIO_ProcessCommandFrame(void)
 {
-	if (SIO_ForwardToFujiNetIfNeeded()) {
-		/* Wait for FujiNet response, handled asynchronously in FujiNet_NetSIO_HandleSyncResponse */
-		TransferStatus = SIO_NoFrame;
-		return FujiNet_NetSIO_GetResponseStatus();
+	int fujinet_status = SIO_ForwardToFujiNetIfNeeded();
+	if (fujinet_status >= 0) {
+		/* Command was handled by FujiNet, return the status it provided */
+		/* TransferStatus should have been set correctly by FujiNet_ProcessSIO */
+		return (UBYTE)fujinet_status;
 	}
-	/* ... original function body follows ... */
+
 	UBYTE devic = CommandFrame[0];
 	UBYTE commd = CommandFrame[1];
 	UBYTE aux1 = CommandFrame[2];
