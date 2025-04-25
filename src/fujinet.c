@@ -610,9 +610,13 @@ UBYTE FujiNet_ProcessSIO(UBYTE device_id, UBYTE command, UBYTE aux1, UBYTE aux2)
                         print_packet(">>> TO FUJINET [ALIVE_RESP]", alive_resp, sizeof(alive_resp), &recv_client_addr);
                         FujiNet_UDP_Send(fujinet_sockfd, alive_resp, sizeof(alive_resp), &recv_client_addr, recv_client_len);
                     } else if (packet_type == NETSIO_CREDIT_STATUS) {
-                        /* Handle Credit Status packet (0xC6) - update credit info if needed */
-                        /* Just acknowledge we received it - no response needed */
-                        Log_print("FUJINET: Received CREDIT_STATUS (0xC6) packet");
+                        unsigned char credit_update[3];
+                        credit_update[0] = NETSIO_CREDIT_UPDATE; /* 0xC7 */
+                        credit_update[1] = 0xC8; /* Low byte (200 = 0xC8) */
+                        credit_update[2] = 0x00; /* High byte */
+                        
+                        Log_print("FUJINET: Received CREDIT_STATUS (0xC6) packet, sending CREDIT_UPDATE with 200 credits");
+                        FujiNet_UDP_Send(fujinet_sockfd, credit_update, sizeof(credit_update), &recv_client_addr, recv_client_len);
                     } else if (packet_type == NETSIO_CREDIT_UPDATE) {
                         /* Handle Credit Update packet (0xC7) - update credit info if needed */
                         /* Just acknowledge we received it - no response needed */

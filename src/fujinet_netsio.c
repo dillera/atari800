@@ -124,9 +124,12 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
     inet_ntop(AF_INET, &(((struct sockaddr_in *)recv_addr)->sin_addr), addr_str, sizeof(addr_str));
 
     /* Log incoming packet */
-    Log_print("NetSIO: Received packet type 0x%02X (%d bytes) from %s:%d",
-              packet_type, (int)len, addr_str, ntohs(((struct sockaddr_in *)recv_addr)->sin_port));
-    print_hex(buffer, len);
+    if (packet_type != NETSIO_CREDIT_STATUS && packet_type != NETSIO_CREDIT_UPDATE) {
+        /* Avoid excessive logging for common credit management packets */
+        Log_print("NetSIO: Received packet type 0x%02X (%d bytes) from %s:%d",
+                packet_type, (int)len, addr_str, ntohs(((struct sockaddr_in *)recv_addr)->sin_port));
+        print_hex(buffer, len);
+    }
     
     /* ======== CONNECTION FLOW - PING & CONNECT ======== */
     
@@ -166,16 +169,16 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
                      addr_str, ntohs(((struct sockaddr_in *)recv_addr)->sin_port));
         }
 
-        /* Prepare PING response + initial CREDIT_UPDATE (10,000 credits) */
+        /* Prepare PING response + initial CREDIT_UPDATE (200 credits) */
         response_buffer[0] = NETSIO_PING_RESPONSE;
         response_buffer[1] = NETSIO_CREDIT_UPDATE;
-        response_buffer[2] = 0x10; // Low byte (10,000)
-        response_buffer[3] = 0x27; // High byte (10,000)
+        response_buffer[2] = 0xC8; // Low byte (200)
+        response_buffer[3] = 0x00; // High byte
         *response_len = 4;
 
         /* Set credits immediately */
-        available_credits = 10000;
-        Log_print("NETSIO FLOW [CONNECTION]: Sending PING_RESPONSE (0xC3) with 10,000 initial credits");
+        available_credits = 200;
+        Log_print("NETSIO FLOW [CONNECTION]: Sending PING_RESPONSE (0xC3) with 200 initial credits");
         
         /* Update timestamp for client activity */
         last_packet_time = time(NULL);
@@ -228,13 +231,13 @@ BOOL FujiNet_NetSIO_ProcessPacket(const unsigned char *buffer, size_t len,
 
         /* Prepare CREDIT_UPDATE response */
         response_buffer[0] = NETSIO_CREDIT_UPDATE; // 0xC7
-        response_buffer[1] = 0x10; // Low byte
-        response_buffer[2] = 0x27; // High byte
+        response_buffer[1] = 0xC8; // Low byte (200)
+        response_buffer[2] = 0x00; // High byte
         *response_len = 3;
 
         /* Optionally update internal credit state */
-        available_credits += 10000;
-        Log_print("NETSIO FLOW [CREDIT]: Sent CREDIT_UPDATE (0xC7) granting 10000 credits");
+        available_credits += 200;
+        Log_print("NETSIO FLOW [CREDIT]: Sent CREDIT_UPDATE (0xC7) granting 200 credits");
         response_generated = TRUE;
     }
     
