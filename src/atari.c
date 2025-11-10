@@ -606,12 +606,37 @@ int Atari800_Initialise(int *argc, char *argv[])
 			Atari800_turbo = TRUE;
 		}
 #ifdef NETSIO
-		else if (strcmp(argv[i], "-netsio") == 0) {
-			/* Disable patched SIO for all devices */
-			ESC_enable_sio_patch = Devices_enable_h_patch = Devices_enable_p_patch = Devices_enable_r_patch = FALSE;
-			if (netsio_init(9997) < 0)
-			{
-				Log_print("netsio: init failed");
+		else if (strcmp(argv[i], "-enable") == 0) {
+			if (i + 1 < *argc && strcmp(argv[i + 1], "netsio") == 0) {
+				/* Disable patched SIO for all devices */
+				ESC_enable_sio_patch = Devices_enable_h_patch = Devices_enable_p_patch = Devices_enable_r_patch = FALSE;
+				if (netsio_init(9997) < 0)
+				{
+					Log_print("netsio: init failed");
+				}
+				argv[++i]; /* consume the "netsio" argument */
+			}
+			else {
+				argv[j++] = argv[i];
+			}
+		}
+		else if (strcmp(argv[i], "-netsio-port") == 0) {
+			if (i + 1 < *argc) {
+				uint16_t port = (uint16_t)Util_sscandec(argv[++i]);
+				if (port == 0) {
+					Log_print("Invalid NetSIO port number");
+					return FALSE;
+				}
+				/* Disable patched SIO for all devices */
+				ESC_enable_sio_patch = Devices_enable_h_patch = Devices_enable_p_patch = Devices_enable_r_patch = FALSE;
+				if (netsio_init(port) < 0)
+				{
+					Log_print("netsio: init failed");
+				}
+			}
+			else {
+				Log_print("Missing port number for '-netsio-port'");
+				return FALSE;
 			}
 		}
 #endif /* NETSIO */
@@ -744,7 +769,8 @@ int Atari800_Initialise(int *argc, char *argv[])
 					Log_print("\t-rdevice [<dev>] Enable R: emulation (using serial device <dev>)");
 #endif
 #ifdef NETSIO
-					Log_print("\t-netsio          Enable NetSIO emulation (for FujiNet-PC support)");
+					Log_print("\t-enable netsio   Enable NetSIO emulation (for FujiNet-PC support)");
+					Log_print("\t-netsio-port <p> Set NetSIO port (default: 9997)");
 #endif
 #ifdef STEREO_SOUND
 					Log_print("\t-stereo          Turn on emulation of two POKEYs");
