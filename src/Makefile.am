@@ -59,6 +59,7 @@ atari800_SOURCES = \
 	pcjoy.h \
 	akey.h \
 	afile.c afile.h \
+	ai_interface.c ai_interface.h \
 	antic.c antic.h \
 	atari.c atari.h \
 	binload.c binload.h \

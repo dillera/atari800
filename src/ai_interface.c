@@ -495,14 +495,15 @@ static void process_command(const char *cmd) {
         AI_SendResponse("{\"status\":\"ok\"}");
     }
     else if (strcmp(cmd_type, "debug_read") == 0) {
+        int i;
         int pos = snprintf(ai_response, sizeof(ai_response),
             "{\"status\":\"ok\",\"data\":[");
-        for (int i = 0; i < ai_debug_buffer_pos && pos < sizeof(ai_response) - 100; i++) {
+        for (i = 0; i < ai_debug_buffer_pos && pos < (int)sizeof(ai_response) - 100; i++) {
             pos += snprintf(ai_response + pos, sizeof(ai_response) - pos,
                 "%s%d", i ? "," : "", ai_debug_buffer[i]);
         }
         pos += snprintf(ai_response + pos, sizeof(ai_response) - pos, "],\"ascii\":\"");
-        for (int i = 0; i < ai_debug_buffer_pos && pos < sizeof(ai_response) - 10; i++) {
+        for (i = 0; i < ai_debug_buffer_pos && pos < (int)sizeof(ai_response) - 10; i++) {
             UBYTE c = ai_debug_buffer[i];
             if (c >= 32 && c < 127 && c != '"' && c != '\\') {
                 ai_response[pos++] = c;
