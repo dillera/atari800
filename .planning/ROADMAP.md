@@ -27,7 +27,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Running `puppetmaster --launch` starts the atari800 emulator with KillZone loaded using a configurable .xex path
   3. Puppetmaster sends W/A/S/D key presses that visibly move the player on screen in the KillZone client
   4. Puppetmaster sends Space and menu keys (Q, Y, N) and releases all keys after pressing them
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Create PuppetmasterController class and full CLI entry point (EMU-01 through EMU-09)
+- [ ] 01-02-PLAN.md — Add --keys/--connect-only flags and human-verify live emulator control
 
 ### Phase 2: Game State Observation
 **Goal**: Puppetmaster can read and parse game state from both screen output and emulator memory
@@ -60,6 +64,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Emulator Interface | 0/? | Not started | - |
+| 1. Emulator Interface | 0/2 | Not started | - |
 | 2. Game State Observation | 0/? | Not started | - |
 | 3. Test Automation and Reporting | 0/? | Not started | - |
