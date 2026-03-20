@@ -30,7 +30,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Create PuppetmasterController class and full CLI entry point (EMU-01 through EMU-09)
+- [x] 01-01-PLAN.md — Create PuppetmasterController class and full CLI entry point (EMU-01 through EMU-09)
 - [ ] 01-02-PLAN.md — Add --keys/--connect-only flags and human-verify live emulator control
 
 ### Phase 2: Game State Observation
@@ -64,6 +64,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Emulator Interface | 0/2 | Not started | - |
+| 1. Emulator Interface | 1/2 | In Progress|  |
 | 2. Game State Observation | 0/? | Not started | - |
 | 3. Test Automation and Reporting | 0/? | Not started | - |
