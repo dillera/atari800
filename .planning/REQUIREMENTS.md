@@ -9,15 +9,15 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Emulator Control
 
-- [ ] **EMU-01**: Puppetmaster can connect to running atari800 emulator via AI socket at `/tmp/atari800_ai.sock`
-- [ ] **EMU-02**: Puppetmaster can launch atari800 emulator with `-ai -xl -run [path]` flags and a configurable KillZone .xex path
-- [ ] **EMU-03**: Puppetmaster can send W key press to move player up
-- [ ] **EMU-04**: Puppetmaster can send A key press to move player left
-- [ ] **EMU-05**: Puppetmaster can send S key press to move player down
-- [ ] **EMU-06**: Puppetmaster can send D key press to move player right
-- [ ] **EMU-07**: Puppetmaster can send Space key press for attack action
-- [ ] **EMU-08**: Puppetmaster can send Q, Y, N key presses for menu navigation
-- [ ] **EMU-09**: Puppetmaster can release keys after pressing them
+- [x] **EMU-01**: Puppetmaster can connect to running atari800 emulator via AI socket at `/tmp/atari800_ai.sock`
+- [x] **EMU-02**: Puppetmaster can launch atari800 emulator with `-ai -xl -run [path]` flags and a configurable KillZone .xex path
+- [x] **EMU-03**: Puppetmaster can send W key press to move player up
+- [x] **EMU-04**: Puppetmaster can send A key press to move player left
+- [x] **EMU-05**: Puppetmaster can send S key press to move player down
+- [x] **EMU-06**: Puppetmaster can send D key press to move player right
+- [x] **EMU-07**: Puppetmaster can send Space key press for attack action
+- [x] **EMU-08**: Puppetmaster can send Q, Y, N key presses for menu navigation
+- [x] **EMU-09**: Puppetmaster can release keys after pressing them
 
 ### Screen Monitoring
 
@@ -77,15 +77,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EMU-01 | Phase 1 | Pending |
-| EMU-02 | Phase 1 | Pending |
-| EMU-03 | Phase 1 | Pending |
-| EMU-04 | Phase 1 | Pending |
-| EMU-05 | Phase 1 | Pending |
-| EMU-06 | Phase 1 | Pending |
-| EMU-07 | Phase 1 | Pending |
-| EMU-08 | Phase 1 | Pending |
-| EMU-09 | Phase 1 | Pending |
+| EMU-01 | Phase 1 | Complete |
+| EMU-02 | Phase 1 | Complete |
+| EMU-03 | Phase 1 | Complete |
+| EMU-04 | Phase 1 | Complete |
+| EMU-05 | Phase 1 | Complete |
+| EMU-06 | Phase 1 | Complete |
+| EMU-07 | Phase 1 | Complete |
+| EMU-08 | Phase 1 | Complete |
+| EMU-09 | Phase 1 | Complete |
 | SCR-01 | Phase 2 | Pending |
 | SCR-02 | Phase 2 | Pending |
 | SCR-03 | Phase 2 | Pending |
