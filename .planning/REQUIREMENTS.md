@@ -77,36 +77,36 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EMU-01 | — | Pending |
-| EMU-02 | — | Pending |
-| EMU-03 | — | Pending |
-| EMU-04 | — | Pending |
-| EMU-05 | — | Pending |
-| EMU-06 | — | Pending |
-| EMU-07 | — | Pending |
-| EMU-08 | — | Pending |
-| EMU-09 | — | Pending |
-| SCR-01 | — | Pending |
-| SCR-02 | — | Pending |
-| SCR-03 | — | Pending |
-| SCR-04 | — | Pending |
-| SCR-05 | — | Pending |
-| MEM-01 | — | Pending |
-| MEM-02 | — | Pending |
-| MEM-03 | — | Pending |
-| MEM-04 | — | Pending |
-| TEST-01 | — | Pending |
-| TEST-02 | — | Pending |
-| TEST-03 | — | Pending |
-| TEST-04 | — | Pending |
-| RPT-01 | — | Pending |
-| RPT-02 | — | Pending |
+| EMU-01 | Phase 1 | Pending |
+| EMU-02 | Phase 1 | Pending |
+| EMU-03 | Phase 1 | Pending |
+| EMU-04 | Phase 1 | Pending |
+| EMU-05 | Phase 1 | Pending |
+| EMU-06 | Phase 1 | Pending |
+| EMU-07 | Phase 1 | Pending |
+| EMU-08 | Phase 1 | Pending |
+| EMU-09 | Phase 1 | Pending |
+| SCR-01 | Phase 2 | Pending |
+| SCR-02 | Phase 2 | Pending |
+| SCR-03 | Phase 2 | Pending |
+| SCR-04 | Phase 2 | Pending |
+| SCR-05 | Phase 2 | Pending |
+| MEM-01 | Phase 2 | Pending |
+| MEM-02 | Phase 2 | Pending |
+| MEM-03 | Phase 2 | Pending |
+| MEM-04 | Phase 2 | Pending |
+| TEST-01 | Phase 3 | Pending |
+| TEST-02 | Phase 3 | Pending |
+| TEST-03 | Phase 3 | Pending |
+| TEST-04 | Phase 3 | Pending |
+| RPT-01 | Phase 3 | Pending |
+| RPT-02 | Phase 3 | Pending |
 
 **Coverage:**
 - v1 requirements: 24 total
-- Mapped to phases: 0
-- Unmapped: 24 ⚠️
+- Mapped to phases: 24
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-20*
-*Last updated: 2026-03-20 after initial definition*
+*Last updated: 2026-03-20 after roadmap creation*
