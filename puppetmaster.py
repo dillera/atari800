@@ -216,6 +216,16 @@ def main():
         action="store_true",
         help="Send demo key sequence after connecting"
     )
+    parser.add_argument(
+        "--keys",
+        action="store_true",
+        help="Send one press of each key (W A S D Space Q Y N) with 10-frame pauses"
+    )
+    parser.add_argument(
+        "--connect-only",
+        action="store_true",
+        help="Connect to emulator, print confirmation, then exit"
+    )
 
     args = parser.parse_args()
 
@@ -232,6 +242,26 @@ def main():
             controller.connect()
 
         print("Puppetmaster ready. Emulator connected.")
+
+        if args.connect_only:
+            sys.exit(0)
+
+        if args.keys:
+            key_sequence = [
+                ("W", "move up", controller.move_up),
+                ("A", "move left", controller.move_left),
+                ("S", "move down", controller.move_down),
+                ("D", "move right", controller.move_right),
+                ("Space", "attack", controller.attack),
+                ("Q", "menu Q", controller.menu_q),
+                ("Y", "menu Y", controller.menu_y),
+                ("N", "menu N", controller.menu_n),
+            ]
+            for key_name, desc, method in key_sequence:
+                print(f"Sending {key_name} ({desc})...")
+                method()
+                controller._client.run(frames=10)
+            print("Keys test complete.")
 
         if args.demo:
             print("Running demo sequence...")
