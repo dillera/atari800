@@ -234,9 +234,76 @@ class Atari800AI:
         return response.get("path", "")
 
     def screen_ascii(self) -> List[str]:
-        """Get screen as ASCII art (40x24 lines)"""
+        """Get screen as ASCII art (40x24 lines) — pixel brightness, NOT text.
+
+        NOTE: This maps pixel luminance to characters like ' .:-=+*#%@'.
+        It does NOT read actual text from the Atari screen. For text content,
+        use screen_text() instead.
+        """
         response = self._send({"cmd": "screen_ascii"})
         return response.get("data", [])
+
+    def screen_text(self, rows: int = 24, cols: int = 40) -> List[str]:
+        """Read actual text from Atari screen memory.
+
+        Reads the ANTIC display list pointer (SAVMSC at $58/$59) to find
+        screen RAM, then converts Atari internal character codes to ASCII.
+        Works for ANTIC mode 2 (standard 40-column text).
+
+        Returns:
+            List of strings, one per screen row.
+        """
+        # Read screen memory address from OS shadow SAVMSC ($58-$59)
+        addr_bytes = self.peek(0x58, 2)
+        if len(addr_bytes) < 2:
+            return []
+        screen_addr = addr_bytes[0] + (addr_bytes[1] << 8)
+
+        # Read screen RAM in chunks (peek limited to 256 bytes per call)
+        total = rows * cols
+        raw = []
+        chunk_size = 256
+        for offset in range(0, total, chunk_size):
+            n = min(chunk_size, total - offset)
+            chunk = self.peek(screen_addr + offset, n)
+            if len(chunk) < n:
+                return []
+            raw.extend(chunk)
+
+        lines = []
+        for row in range(rows):
+            chars = []
+            for col in range(cols):
+                internal = raw[row * cols + col]
+                chars.append(self._internal_to_ascii(internal))
+            lines.append("".join(chars))
+        return lines
+
+    @staticmethod
+    def _internal_to_ascii(code: int) -> str:
+        """Convert Atari internal screen code to ASCII character.
+
+        Atari internal character mapping:
+          0x00-0x3F → ASCII 0x20-0x5F (space, punctuation, digits, uppercase)
+          0x40-0x5F → control characters (mapped to space)
+          0x60-0x7F → ASCII 0x60-0x7F (lowercase a-z)
+          Bit 7 (0x80) = inverse video, stripped before conversion.
+        """
+        base = code & 0x7F  # strip inverse video bit
+        if base < 0x40:
+            return chr(base + 0x20)
+        elif base < 0x60:
+            return ' '  # control characters
+        else:
+            return chr(base)
+
+    def print_screen_text(self):
+        """Print actual text content from screen memory."""
+        lines = self.screen_text()
+        print("+" + "-" * 40 + "+")
+        for line in lines:
+            print("|" + line + "|")
+        print("+" + "-" * 40 + "+")
 
     def screen_raw(self) -> bytes:
         """Get raw screen buffer (384x240 bytes, Atari color codes)"""
@@ -245,7 +312,7 @@ class Atari800AI:
         return base64.b64decode(data) if data else b""
 
     def print_screen(self):
-        """Print screen to console"""
+        """Print screen to console (pixel brightness view)"""
         lines = self.screen_ascii()
         print("+" + "-" * 40 + "+")
         for line in lines:
